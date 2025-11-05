@@ -13,6 +13,7 @@ and generate concise rationales.
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM, LogitsProcessor, LogitsProcessorList
 import re
+import torch.nn.functional as F
 
 
 class EnforceAnswerThenRationaleProcessor(LogitsProcessor):
@@ -131,3 +132,55 @@ class MedGemmaQAWrapper:
             return f"Answer: {answer}\nRationale: {rationale}"
         else:
             return answer
+
+    def generate_with_confidence(self, prompt):
+        """
+        Generate only the answer token and compute its confidence
+        (softmax probability over allowed tokens).
+        Returns:
+            answer (str), confidence (float), option_probs (dict)
+        """
+        if self.task_type in {"yn", "mcq"} and not prompt.strip().endswith("Answer:"):
+            prompt = prompt.rstrip() + "\n\nAnswer:"
+        
+        # Configure allowed tokens
+        if self.task_type == "yn":
+            allowed_ids = self.AB_IDS
+            labels = ["A", "B"]
+        elif self.task_type == "mcq":
+            allowed_ids = self.ABCD_IDS
+            labels = ["A", "B", "C", "D"]
+        else:
+            raise ValueError("Confidence extraction only supported for Y/N or MCQ.")
+        
+        inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
+        processors = LogitsProcessorList([EnforceAnswerThenRationaleProcessor(allowed_ids)])
+        
+        with torch.no_grad():
+            outputs = self.model.generate(
+                **inputs,
+                max_new_tokens=1,
+                logits_processor=processors,
+                do_sample=False,
+                return_dict_in_generate=True,
+                output_scores=True,
+                pad_token_id=self.tokenizer.pad_token_id,
+                eos_token_id=self.tokenizer.eos_token_id,
+            )
+        
+        # Extract generated token
+        gen_token_id = outputs.sequences[0, inputs["input_ids"].shape[1]].item()
+        answer = self.tokenizer.decode([gen_token_id], skip_special_tokens=True).strip()
+        
+        # Compute softmax over vocab for the first generated token
+        logits = outputs.scores[0][0]  # [vocab_size]
+        probs = F.softmax(logits, dim=-1)
+        
+        # Build option probabilities dictionary
+        option_probs = {label: probs[token_id].item() 
+                        for label, token_id in zip(labels, allowed_ids)}
+        
+        # Confidence = probability of the generated token
+        confidence = probs[gen_token_id].item()
+        
+        return answer, confidence, option_probs
