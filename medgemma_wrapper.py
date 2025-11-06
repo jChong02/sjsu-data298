@@ -40,6 +40,10 @@ class MedGemmaQAWrapper:
     """
     MedGemma QA wrapper for constrained answer + rationale generation.
 
+    Supports two modes:
+      - 'answer_rationale': (default) full reasoning output
+      - 'answer_only'    : only generates answer token and confidence
+    
     Supports three task types:
       - 'yn'  : Yes/No questions (forces first token A or B)
       - 'mcq' : Multiple-choice questions (forces A/B/C/D)
@@ -48,6 +52,11 @@ class MedGemmaQAWrapper:
     Methods:
         set_task(task_type): set task type before generation
         generate(prompt): produce structured answer + rationale output
+
+    Attributes (after generation):
+        last_answer (str)
+        last_confidence (float)
+        last_option_probs (dict)
     """
     
     def __init__(self, model_name="google/medgemma-4b-it", device="cuda", token=None):
@@ -64,10 +73,16 @@ class MedGemmaQAWrapper:
         self.model = AutoModelForCausalLM.from_pretrained(model_name, device_map=device, token=token)
         self.device = torch.device(device)
         self.task_type = "free"
+        self.mode = "answer_rationale"
 
         self.AB_IDS = [self.tokenizer.encode("A", add_special_tokens=False)[0],
                        self.tokenizer.encode("B", add_special_tokens=False)[0]]
         self.ABCD_IDS = [self.tokenizer.encode(ch, add_special_tokens=False)[0] for ch in ["A", "B", "C", "D"]]
+
+        # runtime variables to store recent outputs
+        self.last_answer = None
+        self.last_confidence = None
+        self.last_option_probs = None
 
     def set_task(self, task_type):
         """
@@ -75,15 +90,38 @@ class MedGemmaQAWrapper:
         """
         self.task_type = task_type
 
+    def set_mode(self, mode):
+        """
+        Set generation mode:
+          - 'answer_rationale': generate both answer and rationale
+          - 'answer_only'    : generate only answer (with confidence)
+        """
+        if mode not in {"answer_rationale", "answer_only"}:
+            print(f"[Warning] Unknown mode '{mode}', defaulting to 'answer_rationale'")
+            mode = "answer_rationale"
+        self.mode = mode
+
     def generate(self, prompt):
         """
-        Generate a structured response consisting of:
+        Unified generate method.
+        Behavior depends on self.mode:
+          - 'answer_rationale': returns full answer + rationale
+          - 'answer_only': returns only the answer and stores confidence internally
+        """
+        if self.mode == "answer_only":
+            answer, conf, option_probs = self._generate_with_confidence(prompt)
+            self.last_answer = answer
+            self.last_confidence = conf
+            self.last_option_probs = option_probs
+            return f"Answer: {answer}"
+        else:
+            return self._generate_with_rationale(prompt)
 
+    def _generate_with_rationale(self, prompt):
+        """
+        Generate a structured response consisting of:
             Answer: <letter or text>
             Rationale: <short explanation>
-
-        Returns:
-            A formatted string with Answer and Rationale.
         """
         # Ensure prompt ends with 'Answer:' cue for constrained generation
         if self.task_type in {"yn", "mcq"} and not prompt.strip().endswith("Answer:"):
@@ -129,14 +167,21 @@ class MedGemmaQAWrapper:
             rationale = rationale.split("Answer:")[0]
             rationale = re.sub(r"Rationale:\s*", "", rationale)  # remove leading repeated label
             rationale = re.sub(r"\s{2,}", " ", rationale).strip()
+
+            self.last_answer = answer
+            self.last_confidence = None
+            self.last_option_probs = None
+
             return f"Answer: {answer}\nRationale: {rationale}"
         else:
+            self.last_answer = answer
             return answer
 
     def generate_with_confidence(self, prompt):
         """
         Generate only the answer token and compute its confidence
         (softmax probability over allowed tokens).
+        
         Returns:
             answer (str), confidence (float), option_probs (dict)
         """
