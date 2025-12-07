@@ -2,7 +2,7 @@
 
 A unified toolkit for explaining predictions from medical language models using multiple interpretability methods.
 
-## 🚀 Features
+## Features
 
 - **Model-Agnostic Wrapper**: Standardized interface for any HuggingFace medical LLM
 - **Integrated Gradients**: Token-level attribution for model predictions
@@ -10,7 +10,7 @@ A unified toolkit for explaining predictions from medical language models using 
 - **Easy to Use**: Clean API with minimal boilerplate
 - **Extensible**: Add new interpretability methods easily
 
-## 📦 Installation
+## Installation
 
 ```bash
 # Clone the repository
@@ -21,35 +21,33 @@ cd sjsu-data298
 pip install -e .
 ```
 
-## 🏗️ Project Structure
+## Project Structure
 
 ```
 sjsu-data298/
-├── medical_llm_toolkit/          # Main package
-│   ├── model_wrappers/           # LLM interface wrappers
-│   │   ├── medical_llm_wrapper.py
-│   │   └── tokenshap_adapter.py
-│   ├── interpretability_methods/ # XAI implementations
-│   │   ├── integrated_gradients.py
-│   │   └── medical_ig_adapter.py
-│   ├── token_shap/              # TokenSHAP (from TokenSHAP-QA)
-│   ├── tokenshap_extensions/    # TokenSHAP extensions
-│   └── utils/                   # Utilities
+├── TokenSHAP-QA/                # TokenSHAP implementation
+│   ├── token_shap/              # Core TokenSHAP code
+│   └── tokenshap_extensions/    # QA-specific extensions
+├── medical_llm_wrapper.py       # Model-agnostic wrapper
+├── integrated_gradients.py      # IG base implementation
+├── medical_ig_adapter.py        # IG adapter for medical wrapper
+├── tokenshap_adapter.py         # TokenSHAP adapter
 ├── notebooks/                   # Jupyter demos
 │   ├── demo_wrapper.ipynb
 │   └── demo_ig.ipynb
 ├── examples/                    # Standalone examples
 │   └── basic_usage.py
-└── tests/                       # Unit tests
+├── data/                        # Dataset files
+└── setup.py                     # Package configuration
 
 ```
 
-## 🎯 Quick Start
+## Quick Start
 
 ### 1. Load a Medical LLM
 
 ```python
-from medical_llm_toolkit import load_medical_llm
+from medical_llm_wrapper import load_medical_llm
 
 # Load model
 wrapper = load_medical_llm(
@@ -79,7 +77,7 @@ print(f"Answer: {answer}")
 ### 3. Explain with Integrated Gradients
 
 ```python
-from medical_llm_toolkit import MedicalIntegratedGradients
+from medical_ig_adapter import MedicalIntegratedGradients
 
 ig = MedicalIntegratedGradients(wrapper)
 result = ig.attribute(prompt, target_class="C")
@@ -91,7 +89,7 @@ print(f"Top tokens: {result['tokens'][:5]}")
 ### 4. Explain with TokenSHAP
 
 ```python
-from medical_llm_toolkit.model_wrappers import MedicalTokenSHAP
+from tokenshap_adapter import MedicalTokenSHAP
 
 shap = MedicalTokenSHAP(wrapper)
 result = shap.explain(prompt, target_class="C", n_samples=100)
@@ -99,7 +97,7 @@ result = shap.explain(prompt, target_class="C", n_samples=100)
 print(f"SHAP values: {result['shap_values']}")
 ```
 
-## 📚 Examples
+## Examples
 
 See `examples/basic_usage.py` for a complete working example.
 
@@ -107,13 +105,13 @@ See `notebooks/` for interactive demos:
 - `demo_wrapper.ipynb` - Wrapper functionality
 - `demo_ig.ipynb` - Integrated Gradients explanations
 
-## 🔧 Supported Models
+## Supported Models
 
 Works with any HuggingFace causal language model:
 - **Medical LLMs**: MedGemma, BioMistral, BioMedLM, Apollo
 - **General LLMs**: Llama, Mistral, GPT, etc.
 
-## 📖 Citation
+## Citation
 
 If you use this toolkit, please cite:
 
@@ -126,15 +124,15 @@ If you use this toolkit, please cite:
 }
 ```
 
-## 🤝 Contributing
+## Contributing
 
 This project integrates TokenSHAP from [TokenSHAP-QA](https://github.com/jChong02/TokenSHAP-QA).
 
-## 📄 License
+## License
 
 See LICENSE file for details.
 
-## 🙏 Acknowledgments
+## Acknowledgments
 
 - TokenSHAP implementation from TokenSHAP-QA repository
 - Built on HuggingFace Transformers
