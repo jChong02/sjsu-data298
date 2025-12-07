@@ -128,10 +128,6 @@ If you use this toolkit, please cite:
 
 This project integrates TokenSHAP from [TokenSHAP-QA](https://github.com/jChong02/TokenSHAP-QA).
 
-## License
-
-See LICENSE file for details.
-
 ## Acknowledgments
 
 - TokenSHAP implementation from TokenSHAP-QA repository
