@@ -1,8 +1,8 @@
 # qa_tokenshap.py
 
 from typing import Optional, Callable, List, Dict
-from token_shap.base import ModelBase, TextVectorizer
-from token_shap.token_shap import TokenSHAP, Splitter
+from ..token_shap.base import ModelBase, TextVectorizer
+from ..token_shap.token_shap import TokenSHAP, Splitter
 from .extractors import qa_extractor
 
 class QATokenSHAP(TokenSHAP):
