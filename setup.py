@@ -29,5 +29,6 @@ setup(
         "matplotlib>=3.7.0",
         "accelerate>=0.20.0",
         "shap>=0.42.0",
+        "scikit-learn>=1.0.0",
     ],
 )
