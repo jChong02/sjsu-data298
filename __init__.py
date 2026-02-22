@@ -2,7 +2,13 @@
 
 from .integrated_gradients import IntegratedGradients, IntegratedGradientsConfig
 from .medical_ig_adapter import MedicalIntegratedGradients, explain_medical_prediction
-from .medical_lime_adapter import MedicalLIME, explain_with_lime, visualize_lime_attributions
+from .medical_lime_adapter import (
+    MedicalLIME,
+    explain_with_lime,
+    visualize_lime_attributions,
+    to_dataframe,
+    to_json_serializable,
+)
 
 __all__ = [
     "IntegratedGradients",
@@ -12,4 +18,6 @@ __all__ = [
     "MedicalLIME",
     "explain_with_lime",
     "visualize_lime_attributions",
+    "to_dataframe",
+    "to_json_serializable",
 ]
