@@ -25,21 +25,39 @@ pip install -e .
 
 ```
 sjsu-data298/
-├── TokenSHAP-QA/                # TokenSHAP implementation
-│   ├── token_shap/              # Core TokenSHAP code
-│   └── tokenshap_extensions/    # QA-specific extensions
-├── medical_llm_wrapper.py       # Model-agnostic wrapper
-├── integrated_gradients.py      # IG base implementation
-├── medical_ig_adapter.py        # IG adapter for medical wrapper
-├── tokenshap_adapter.py         # TokenSHAP adapter
-├── notebooks/                   # Jupyter demos
+├── TokenSHAP-QA/                        # TokenSHAP implementation
+│   ├── token_shap/                      # Core TokenSHAP code
+│   │   ├── base.py
+│   │   ├── token_shap.py
+│   │   ├── pixel_shap.py
+│   │   ├── visualization.py
+│   │   ├── image_utils.py
+│   │   └── video_utils.py
+│   └── tokenshap_extensions/            # QA-specific extensions
+│       ├── extractors.py
+│       ├── qa_tokenshap.py
+│       └── value_functions/
+│           └── correctness_aware.py
+├── medical_llm_wrapper.py               # Model-agnostic wrapper
+├── integrated_gradients.py              # IG base implementation
+├── medical_ig_adapter.py                # IG adapter for medical wrapper
+├── medical_lime_adapter.py              # LIME adapter for medical wrapper
+├── medical_llm_wrapper_demo.ipynb       # Wrapper demo notebook
+├── notebooks/                           # Jupyter demos
 │   ├── demo_wrapper.ipynb
 │   └── demo_ig.ipynb
-├── examples/                    # Standalone examples
+├── examples/                            # Standalone examples
 │   └── basic_usage.py
-├── data/                        # Dataset files
-└── setup.py                     # Package configuration
-
+├── data/                                # Dataset files
+│   ├── compiled_df.parquet
+│   ├── mcq_df.parquet
+│   └── yn_df.parquet
+├── data-prep/                           # Data preparation notebooks
+│   ├── preliminary_dataset_exploration.ipynb
+│   └── preprocessing.ipynb
+├── deprecated/                          # Deprecated code
+├── requirements.txt                     # Python dependencies
+└── setup.py                             # Package configuration
 ```
 
 ## Quick Start
@@ -96,6 +114,27 @@ result = shap.explain(prompt, target_class="C", n_samples=100)
 
 print(f"SHAP values: {result['shap_values']}")
 ```
+
+### 5. Explain with LIME
+
+```python
+from medical_lime_adapter import MedicalLIME
+
+lime = MedicalLIME(wrapper)
+
+# Auto-detect predicted class as the target
+result = lime.analyze(prompt)
+
+# Or specify the class to explain, with color-coded visualization
+result = lime.analyze(prompt, target_class="C", visualize=True)
+
+print(f"Prediction: {result['prediction']}")
+print(f"All option probs: {result['all_option_probs']}")  # {'A': 0.1, 'B': 0.1, 'C': 0.7, 'D': 0.1}
+print(f"Top words: {result['top_words'][:5]}")            # [(word, score), ...] by |attribution|
+print(f"Local model fit R²: {result['r_squared']:.3f}")
+```
+
+`MedicalLIME` perturbs the input prompt word-by-word, queries the model on each perturbation, and fits a local linear model to produce signed word-level attribution scores. Positive scores (red in visualization) indicate words that increase `P(target_class)`; negative scores (blue) indicate words that decrease it.
 
 ## Examples
 
