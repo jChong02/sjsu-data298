@@ -1,18 +1,16 @@
+
 """
 Run:
-    python ELI5_updated.py
+    python ELI5_adapter.py
 
-Before running, edit the CONFIG section below dataset path, model id, device, sample size if needed
+Before running, edit the CONFIG section below if needed
 
-Requirements:
-    pip install -U pandas pyarrow numpy scikit-learn eli5 matplotlib
+Requirements (example):
+    pip install -U pandas pyarrow numpy scikit-learn eli5 matplotlib huggingface_hub
 
-Also required in the same folder (or on PYTHONPATH):
+Also required:
     medical_llm_wrapper_fixed.py   (defines MedicalLLMWrapper)
-
-Hugging Face token:
-    - set an env var named HF_TOKEN (recommended):
-        export HF_TOKEN="hf_..."
+    compiled_df.parquet
 """
 
 import os, re, time
@@ -20,68 +18,580 @@ from collections import Counter
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-
+import torch
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, balanced_accuracy_score, classification_report, confusion_matrix
 from sklearn.pipeline import make_pipeline
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
-
 import eli5
+from huggingface_hub import login
+from medical_llm_wrapper_fixed import MedicalLLMWrapper
 
+try:
+    from IPython.display import display 
+except Exception: 
+    def display(x):
+        print(x)
+
+
+# CONFIG
 SEED = 42
 rng = np.random.default_rng(SEED)
+DATA_PATH = "/data/compiled_df.parquet"
+HF_TOKEN = os.environ.get('HF_TOKEN')
+MODEL_ID = "BioMistral/BioMistral-7B"
+DEVICE = "cuda"
 
 
-#  CONFIG
+# helper functions
+def extract_abcd_from_options(options_text: str):
+    if options_text is None:
+        return None
+    s = str(options_text)
 
-DATA_PATH = "compiled_df.parquet"  
-MODEL_ID = "BioMistral/BioMistral-7B" 
-DEVICE = "cuda" 
-N_SAMPLES = 1000  
+    matches = re.findall(r"(?is)\b([ABCD])\s*[\.\)]\s*(.*?)(?=\n\s*[ABCD]\s*[\.\)]|\Z)", s)
+    if not matches or len(matches) < 4:
+        return None
+    d = {k.upper(): v.strip() for k, v in matches}
+    if all(k in d for k in ["A","B","C","D"]):
+        return d
+    return None
 
-USE_CONFIDENCE_GATE = True  
-CONF_THRESHOLD = 0.65
+def render_mcq_prompt(question: str, options_text: str):
+    opts = extract_abcd_from_options(options_text)
+    if not opts:
+        return (
+            "You are a careful medical question-answering assistant.\n"
+            "Choose the single best option.\n\n"
+            f"Question: {question}\n"
+            f"{options_text}\n"
+            "Answer: "
+        )
+    return (
+        "You are a careful medical question-answering assistant.\n"
+        "Choose the single best option.\n\n"
+        f"Question: {question}\n"
+        "Answer Choices:\n"
+        f"A. {opts['A']}\n"
+        f"B. {opts['B']}\n"
+        f"C. {opts['C']}\n"
+        f"D. {opts['D']}\n"
+        "Answer: "
+    )
 
-TRAIN_SURROGATE = True 
-SURROGATE_TOP = 30 
-EXPLAIN_ERRORS = 5  
+def render_yn_prompt(question: str):
+    return (
+        "You are a careful medical question-answering assistant.\n"
+        "Answer Yes or No.\n"
+        "Use A for Yes and B for No.\n\n"
+        f"Question: {question}\n"
+        "Answer: "
+    )
 
-SEED = 42
-HF_TOKEN = os.environ.get("HF_TOKEN")
+def parse_mcq_answer_strict(text: str):
+    if text is None:
+        return None
+    t = str(text).strip()
 
-# Load data 
-def load_compiled_df(path: str) -> pd.DataFrame:
-    df = pd.read_parquet(path)
+    m = re.search(r"(?im)^\s*Final:\s*([ABCD])\s*$", t)
+    if m: return m.group(1).upper()
+
+    m = re.search(r"(?im)^\s*Answer:\s*([ABCD])\s*$", t)
+    if m: return m.group(1).upper()
+
+    lines = [ln.strip() for ln in t.splitlines() if ln.strip()]
+    for ln in reversed(lines):
+        if re.fullmatch(r"[ABCD]", ln, flags=re.IGNORECASE):
+            return ln.upper()
+    return None
+
+def parse_yn_answer_strict(text: str):
+    if text is None:
+        return None
+    t = str(text).strip()
+
+    m = re.search(r"(?im)^\s*Final:\s*([AB])\s*$", t)
+    if m: return m.group(1).upper()
+
+    m = re.search(r"(?im)^\s*Answer:\s*([AB])\s*$", t)
+    if m: return m.group(1).upper()
+
+    lines = [ln.strip() for ln in t.splitlines() if ln.strip()]
+    for ln in reversed(lines):
+        if re.fullmatch(r"[AB]", ln, flags=re.IGNORECASE):
+            return ln.upper()
+
+    return None
+
+def normalize_gold_yn(val):
+    g = str(val).strip().lower()
+    if g in {"yes", "y", "true", "t", "1", "a"}:
+        return "A"  # Yes
+    if g in {"no", "n", "false", "f", "0", "b"}:
+        return "B"  # No
+    return None
+
+def reasoning_suffix_mcq():
+    return (
+        "\n\nExplain briefly (1-3 sentences).\n"
+        "Then output the final answer on the last line ONLY as:\n"
+        "Final: A\n"
+        "or Final: B\n"
+        "or Final: C\n"
+        "or Final: D\n"
+        "Do not write anything after the Final line."
+    )
+
+def reasoning_suffix_yn():
+    return (
+        "\n\nExplain briefly (1-3 sentences).\n"
+        "Then output the final answer on the last line ONLY as:\n"
+        "Final: A   (A = Yes)\n"
+        "or Final: B   (B = No)\n"
+        "Do not write anything after the Final line."
+    )
+
+def eval_mcq_answer_only(df_mcq: pd.DataFrame, n=1000, seed=7):
+    df_s = df_mcq.sample(n=min(n, len(df_mcq)), random_state=seed).reset_index(drop=True)
+    golds, preds = [], []
+
+    for r in df_s.to_dict("records"):
+        gold = str(r["answer_label"]).strip().upper()
+        if gold not in {"A","B","C","D"}:
+            continue
+
+        prompt = render_mcq_prompt(r["question"], r["options"])
+        llm.set_task("mcq"); llm.set_mode("answer_only")
+        out = llm.generate(prompt)
+        pred = parse_mcq_answer_strict(out)
+
+        if pred not in {"A","B","C","D"}:
+            continue
+
+        golds.append(gold); preds.append(pred)
+
+    acc = accuracy_score(golds, preds) if golds else 0.0
+    print(f"MCQ answer_only accuracy: {acc:.4f} (n={len(golds)}/{len(df_s)})")
+    print(classification_report(golds, preds, labels=["A","B","C","D"]))
+    return acc
+
+def eval_yn_answer_only(df_yn: pd.DataFrame, n=600, seed=7):
+    df_s = df_yn.sample(n=min(n, len(df_yn)), random_state=seed).reset_index(drop=True)
+    golds, preds = [], []
+
+    for r in df_s.to_dict("records"):
+        gold = normalize_gold_yn(r["answer_label"])
+        if gold not in {"A","B"}:
+            continue
+
+        prompt = render_yn_prompt(r["question"])
+        llm.set_task("yn"); llm.set_mode("answer_only")
+        out = llm.generate(prompt)
+        pred = parse_yn_answer_strict(out)
+
+        if pred not in {"A","B"}:
+            continue
+
+        golds.append(gold); preds.append(pred)
+
+    acc = accuracy_score(golds, preds) if golds else 0.0
+    print(f"Y/N answer_only accuracy: {acc:.4f} (n={len(golds)}/{len(df_s)})")
+    print(classification_report(golds, preds, labels=["A","B"]))
+
+    return acc
+
+def clean_text(t: str):
+    t = str(t or "")
+    t = re.sub(r"\s+", " ", t).strip()
+    return t
+
+def mcq_surrogate_text(question: str, options_text: str):
+    opts = extract_abcd_from_options(options_text)
+    if not opts:
+        return clean_text(question + " " + str(options_text))
+    return clean_text(
+        f"{question} "
+        f"A {opts['A']} "
+        f"B {opts['B']} "
+        f"C {opts['C']} "
+        f"D {opts['D']}"
+    )
+
+def yn_surrogate_text(question: str):
+    return clean_text(question + " (A=Yes, B=No)")
+
+def train_surrogate_return_parts(X_texts, y, title="", top=30, seed=7):
+    if len(set(y)) < 2:
+        print(f"[{title}] Not enough class variety.")
+        return None, None, None
+
+    Xtr, Xte, ytr, yte = train_test_split(
+        X_texts, y, test_size=0.2, random_state=seed, stratify=y
+    )
+
+    tf = TfidfVectorizer(ngram_range=(1,2), min_df=2, max_df=0.95)
+    clf = LogisticRegression(max_iter=4000)
+
+    Xtr_t = tf.fit_transform(Xtr)
+    clf.fit(Xtr_t, ytr)
+
+    score = clf.score(tf.transform(Xte), yte)
+    print(f"[{title}] heldout score: {score:.3f} (n_test={len(yte)})")
+
+    pipe = make_pipeline(tf, clf)
+    feat_names = tf.get_feature_names_out()
+    try:
+        display(eli5.show_weights(clf, top=top, feature_names=feat_names))
+    except Exception as e:
+        # fallback
+        print("[eli5.show_weights] error:", e)
+
+    return pipe, tf, clf
+
+def eli5_explain_case_parts(vectorizer, classifier, text, top=20, display_html=True):
+    X = vectorizer.transform([text])
+    x_dense = X.toarray()[0]
+
+    feature_names = vectorizer.get_feature_names_out()
+
+    try:
+        disp = eli5.show_prediction(classifier, x_dense, feature_names=feature_names, top=top)
+        if display_html:
+            display(disp)
+        else:
+            return disp
+    except Exception as e:
+        print("[eli5.show_prediction] error:", e)
+        print("Falling back to top weighted features from classifier.coef_")
+        coefs = classifier.coef_
+        if coefs.ndim == 1 or coefs.shape[0] == 1:
+            coef = coefs.ravel()
+        else:
+            coef = coefs.max(axis=0)
+        top_idx_pos = np.argsort(-coef)[:top]
+        top_idx_neg = np.argsort(coef)[:top]
+        names = feature_names
+        print("\nTop positive features:")
+        for i in top_idx_pos:
+            print(f"{coef[i]:+.3f}\t{names[i]}")
+        print("\nTop negative features:")
+        for i in top_idx_neg:
+            print(f"{coef[i]:+.3f}\t{names[i]}")
+
+def collect_mcq_for_surrogates(df_mcq, n=1500, seed=7):
+    df_s = df_mcq.sample(n=min(n, len(df_mcq)), random_state=seed).reset_index(drop=True)
+    rows = []
+    for r in df_s.to_dict("records"):
+        gold = str(r["answer_label"]).strip().upper()
+        if gold not in {"A","B","C","D"}:
+            continue
+
+        prompt = render_mcq_prompt(r["question"], r["options"])
+        llm.set_task("mcq"); llm.set_mode("answer_only")
+        out = llm.generate(prompt)
+        pred = parse_mcq_answer_strict(out)
+        if pred not in {"A","B","C","D"}:
+            continue
+
+        rows.append({
+            "text": mcq_surrogate_text(r["question"], r["options"]),
+            "gold": gold,
+            "pred": pred,
+            "wrong": int(pred != gold),
+            "question": r["question"],
+            "options": r["options"],
+        })
+    return pd.DataFrame(rows)
+
+def collect_yn_for_surrogates(df_yn, n=1500, seed=7):
+    df_s = df_yn.sample(n=min(n, len(df_yn)), random_state=seed).reset_index(drop=True)
+    rows = []
+    for r in df_s.to_dict("records"):
+        gold = normalize_gold_yn(r["answer_label"])
+        if gold not in {"A","B"}:
+            continue
+
+        prompt = render_yn_prompt(r["question"])
+        llm.set_task("yn"); llm.set_mode("answer_only")
+        out = llm.generate(prompt)
+        pred = parse_yn_answer_strict(out)
+        if pred not in {"A","B"}:
+            continue
+
+        rows.append({
+            "text": yn_surrogate_text(r["question"]),
+            "gold": gold,
+            "pred": pred,
+            "wrong": int(pred != gold),
+            "question": r["question"],
+        })
+    return pd.DataFrame(rows)
+
+def explain_case(bundle, text, top=20):
+    if bundle.get("mimic"):
+        print("\n[ELI5] mimic_llm (why the model predicts what it predicts):")
+        display(eli5.show_prediction(bundle["mimic"], text, top=top))
+    if bundle.get("gold"):
+        print("\n[ELI5] predict_gold (features associated with correct labels):")
+        display(eli5.show_prediction(bundle["gold"], text, top=top))
+    if bundle.get("error"):
+        print("\n[ELI5] predict_error (features associated with failures):")
+        display(eli5.show_prediction(bundle["error"], text, top=top))
+
+def get_tf_clf_from_bundle(bundle, key):
+    if bundle is None:
+        return None, None
+
+    part = bundle.get(key, None) if isinstance(bundle, dict) else bundle
+
+    # If part is a dict with tf/clf
+    if isinstance(part, dict):
+        tf = part.get("tf", None)
+        clf = part.get("clf", None)
+        if tf is not None and clf is not None:
+            return tf, clf
+
+        pipe = part.get("pipe", None)
+        if pipe is not None and hasattr(pipe, "named_steps"):
+            tf = pipe.named_steps.get("tfidfvectorizer") or pipe.named_steps.get("tfidfvectorizer".replace("_",""))
+            clf = pipe.named_steps.get("logisticregression") or pipe.named_steps.get("logisticregression".replace("_",""))
+            return tf, clf
+
+    # If part is a sklearn Pipeline directly
+    if hasattr(part, "named_steps"):
+        pipe = part
+        tf = pipe.named_steps.get("tfidfvectorizer") or pipe.named_steps.get("tfidfvectorizer".replace("_",""))
+        if tf is None:
+            first = list(pipe.named_steps.items())[0][1]
+            tf = first if hasattr(first, "vocabulary_") or hasattr(first, "get_feature_names_out") else None
+        clf = pipe.named_steps.get("logisticregression") or pipe.named_steps.get("logisticregression".replace("_",""))
+        if clf is None:
+            last = list(pipe.named_steps.items())[-1][1]
+            clf = last if hasattr(last, "coef_") else None
+        return tf, clf
+
+    return None, None
+
+def show_wrong_cases_with_eli5(bundle, wrong_cases_df, which="gold", top=20):
+    tf, clf = get_tf_clf_from_bundle(bundle, which)
+    if tf is None or clf is None:
+        print(f"[ERROR] Could not extract tf/clf for '{which}' from bundle. Inspect bundle keys:", list(bundle.keys()) if bundle else None)
+        return
+
+    for _, r in wrong_cases_df.iterrows():
+        print("\n============================")
+        print(f"{which.upper()} GOLD: {r.get('gold')} PRED: {r.get('pred')}")
+        print("Q:", r.get("question"))
+        text = r.get("text") or r.get("question")
+        try:
+            # eli5_explain_case_parts expects
+            eli5_explain_case_parts(tf, clf, text, top=top, display_html=True)
+        except Exception as e:
+            print("[eli5_explain_case_parts] error:", e)
+            # fallback
+            try:
+                X = tf.transform([text])
+                x_dense = X.toarray()[0]
+                feature_names = tf.get_feature_names_out()
+                if hasattr(clf, "coef_"):
+                    coefs = clf.coef_
+                    if coefs.ndim == 1 or coefs.shape[0] == 1:
+                        coef = coefs.ravel()
+                        contrib = coef * x_dense
+                        top_idx = np.argsort(-contrib)[:top]
+                        print("\nTop contributing features (positive):")
+                        for i in top_idx:
+                            if x_dense[i] != 0:
+                                print(f"{contrib[i]:+.3f}\t{feature_names[i]}")
+                        neg_idx = np.argsort(contrib)[:top]
+                        print("\nTop contributing features (negative):")
+                        for i in neg_idx:
+                            if x_dense[i] != 0:
+                                print(f"{contrib[i]:+.3f}\t{feature_names[i]}")
+                    else:
+                        contribs = (coefs * x_dense).max(axis=0)
+                        top_idx = np.argsort(-contribs)[:top]
+                        print("\nTop features by max-class contribution:")
+                        for i in top_idx:
+                            print(f"{contribs[i]:+.3f}\t{feature_names[i]}")
+                else:
+                    print("Classifier has no coef_, cannot compute contributions.")
+            except Exception as e2:
+                print("Fallback failed:", e2)
+
+def debug_inspect_bundle(bundle):
+    print("BUNDLE KEYS:", list(bundle.keys()) if isinstance(bundle, dict) else "bundle not dict")
+    for k in (bundle.keys() if isinstance(bundle, dict) else []):
+        val = bundle[k]
+        print(f"\n--- key: {k} ---")
+        print("type:", type(val))
+        # small repr
+        rep = repr(val)
+        print("repr:", rep[:400] + ("..." if len(rep) > 400 else ""))
+        # show attributes that might help
+        attrs = []
+        for a in ("named_steps","steps","get_params","tf","clf","pipe"):
+            if hasattr(val, a):
+                attrs.append(a)
+        if attrs:
+            print("has attrs:", attrs)
+        else:
+            print("no obvious attrs")
+
+def extract_tf_clf_from_obj(obj):
+    # None
+    if obj is None:
+        return None, None
+
+    if isinstance(obj, dict):
+        tf = obj.get("tf") or obj.get("vectorizer") or obj.get("tfidf") or obj.get("tfidfvectorizer")
+        clf = obj.get("clf") or obj.get("classifier") or obj.get("model") or obj.get("logisticregression")
+        if tf is not None and clf is not None:
+            return tf, clf
+        pipe = obj.get("pipe")
+        if pipe is not None:
+            obj = pipe  # fall through
+
+    if hasattr(obj, "named_steps"):
+        ns = obj.named_steps
+        tf = None; clf = None
+        for name in ("tfidfvectorizer","tfidf","vectorizer","tfidf_vectorizer","tfidfvectoriser"):
+            if name in ns:
+                tf = ns[name]
+                break
+        for name in ("logisticregression","classifier","clf","logreg","logistic"):
+            if name in ns:
+                clf = ns[name]
+                break
+
+        if tf is None:
+            try:
+                first = list(ns.items())[0][1]
+                if hasattr(first, "get_feature_names_out") or hasattr(first, "vocabulary_"):
+                    tf = first
+            except Exception:
+                pass
+        if clf is None:
+            try:
+                last = list(ns.items())[-1][1]
+                if hasattr(last, "coef_") or hasattr(last, "decision_function"):
+                    clf = last
+            except Exception:
+                pass
+        if tf is not None and clf is not None:
+            return tf, clf
+
+    if hasattr(obj, "steps"):
+        try:
+            steps = obj.steps
+            if len(steps) >= 2:
+                first = steps[0][1]
+                last = steps[-1][1]
+                tf = first if (hasattr(first,"get_feature_names_out") or hasattr(first,"vocabulary_")) else None
+                clf = last if (hasattr(last,"coef_") or hasattr(last,"decision_function")) else None
+                if tf is not None and clf is not None:
+                    return tf, clf
+        except Exception:
+            pass
+
+    if isinstance(obj, (list, tuple)):
+        if len(obj) >= 2:
+            a, b = obj[0], obj[1]
+            if hasattr(a, "get_feature_names_out") and (hasattr(b, "coef_") or hasattr(b, "decision_function")):
+                return a, b
+            if len(obj) >= 3:
+                a2, b2, c2 = obj[0], obj[1], obj[2]
+                if hasattr(b2, "get_feature_names_out") and (hasattr(c2, "coef_") or hasattr(c2, "decision_function")):
+                    return b2, c2
+    if hasattr(obj, "get_feature_names_out") and hasattr(obj, "transform"):
+        return obj, None
+    if hasattr(obj, "coef_") or hasattr(obj, "decision_function"):
+        return None, obj
+
+    return None, None
+
+def explain_with_fallback(tf, clf, text, top=20):
+    try:
+        if tf is None or clf is None:
+            raise ValueError("tf or clf is None")
+        eli5_explain_case_parts(tf, clf, text, top=top, display_html=True)
+        return
+    except Exception as e:
+        print("[fallback explain] eli5_explain_case_parts failed:", e)
+        try:
+            X = tf.transform([text])
+            x_dense = X.toarray()[0]
+            feature_names = tf.get_feature_names_out()
+            if hasattr(clf, "coef_"):
+                coefs = clf.coef_
+                if coefs.ndim == 1 or coefs.shape[0] == 1:
+                    coef = coefs.ravel()
+                    contrib = coef * x_dense
+                    top_idx_pos = np.argsort(-contrib)[:top]
+                    top_idx_neg = np.argsort(contrib)[:top]
+                    print("\nTop positive contributions:")
+                    for i in top_idx_pos:
+                        if x_dense[i] != 0:
+                            print(f"{contrib[i]:+.3f}\t{feature_names[i]}")
+                    print("\nTop negative contributions:")
+                    for i in top_idx_neg:
+                        if x_dense[i] != 0:
+                            print(f"{contrib[i]:+.3f}\t{feature_names[i]}")
+                else:
+                    # multiclass fallback
+                    contribs = (coefs * x_dense).max(axis=0)
+                    top_idx = np.argsort(-contribs)[:top]
+                    print("\nTop features by max-class contribution:")
+                    for i in top_idx:
+                        print(f"{contribs[i]:+.3f}\t{feature_names[i]}")
+            else:
+                print("Classifier has no coef_; cannot compute contributions.")
+        except Exception as e2:
+            print("Fallback failed:", e2)
+
+
+# MAIN
+def main():
+    if HF_TOKEN:
+        login(token=HF_TOKEN)
+    else:
+        login()
+
+    df = pd.read_parquet(DATA_PATH)
+
     print("Rows:", len(df))
+
     print("Columns:", df.columns.tolist())
 
-    if "question_type" in df.columns:
-        qt = df["question_type"].astype(str).str.strip().str.lower()
-        qt = qt.replace({"yn":"y/n", "yes/no":"y/n", "y\n":"y/n"})
-        df["question_type_norm"] = qt
+    qt = df["question_type"].astype(str).str.strip().str.lower()
 
-        print("\nquestion_type counts:")
-        print(df["question_type_norm"].value_counts(dropna=False))
-    else:
-        df["question_type_norm"] = ""
+    qt = qt.replace({"yn":"y/n", "yes/no":"y/n", "y\n":"y/n"})
 
-    return df
+    df["question_type_norm"] = qt
 
+    print("\nquestion_type counts:")
 
-def split_mcq_yn(df: pd.DataFrame):
+    print(df["question_type_norm"].value_counts(dropna=False))
+
+    assert "question" in df.columns
+
+    assert "answer_label" in df.columns
+
     mcq = df[df["question_type_norm"].isin(["mcq","multiple choice","multiple-choice","mcq "])].copy()
+
     yn  = df[df["question_type_norm"].isin(["y/n","yes/no","yn"])].copy()
 
     if len(mcq)==0 and "options" in df.columns:
         mcq = df[df["options"].notna()].copy()
+
     if len(yn)==0:
         yn = df[df["answer_label"].astype(str).str.lower().isin(["yes","no"])].copy()
 
     print("MCQ rows:", len(mcq))
+
     print("YN  rows:", len(yn))
 
-    # Clean label formats
     if len(mcq):
         mcq["answer_label"] = mcq["answer_label"].astype(str).str.strip().str.upper()
         mcq = mcq[mcq["answer_label"].isin(["A","B","C","D"])].copy()
@@ -90,354 +600,13 @@ def split_mcq_yn(df: pd.DataFrame):
         yn["answer_label"] = yn["answer_label"].astype(str).str.strip().str.lower()
         yn = yn[yn["answer_label"].isin(["yes","no"])].copy()
 
-    if len(mcq):
-        print("MCQ label dist:", Counter(mcq["answer_label"]))
-    return mcq, yn
+    print("MCQ label dist:", Counter(mcq["answer_label"]) if len(mcq) else {})
 
+    print("YN  label dist:", Counter(yn["answer_label"]) if len(yn) else {})
 
-# Prompt builder
-def parse_options_any_format(options_val):
-    if options_val is None or (isinstance(options_val, float) and np.isnan(options_val)):
-        return None
+    ex = mcq.iloc[0]
 
-    if isinstance(options_val, (list, tuple)) and len(options_val) >= 4:
-        return [str(options_val[i]).strip() for i in range(4)]
-
-    if isinstance(options_val, dict):
-        keys = [k.upper() for k in options_val.keys() if isinstance(k, str)]
-        if all(k in keys for k in ["A","B","C","D"]):
-            return [str(options_val["A"]).strip(), str(options_val["B"]).strip(),
-                    str(options_val["C"]).strip(), str(options_val["D"]).strip()]
-        try:
-            return [str(options_val[i]).strip() for i in range(4)]
-        except Exception:
-            return None
-
-    s = str(options_val).replace("\r", "\n")
-
-    # Already A./B./C./D. formatted
-    if re.search(r"\bA[\).:]\s", s, re.IGNORECASE) and re.search(r"\bB[\).:]\s", s, re.IGNORECASE):
-        patt = r"(?:^|\n)\s*([ABCD])[\).:]\s*(.+?)(?=(?:\n\s*[ABCD][\).:]\s)|\Z)"
-        chunks = re.findall(patt, s, flags=re.IGNORECASE | re.DOTALL)
-        if chunks:
-            d = {k.upper(): re.sub(r"\s+", " ", v).strip() for k, v in chunks}
-            if all(k in d for k in ["A","B","C","D"]):
-                return [d["A"], d["B"], d["C"], d["D"]]
-
-    m = re.findall(r"'([^']+)'", s)
-    if len(m) >= 4:
-        return [m[0].strip(), m[1].strip(), m[2].strip(), m[3].strip()]
-    m2 = re.findall(r"\"([^\"]+)\"", s)
-    if len(m2) >= 4:
-        return [m2[0].strip(), m2[1].strip(), m2[2].strip(), m2[3].strip()]
-
-    return None
-
-
-def render_mcq_prompt(question: str, options_val, prompt_text=None) -> str:
-    # Use prompt_text only if it already contains explicit options
-    if prompt_text is not None and str(prompt_text).strip():
-        base = str(prompt_text).strip()
-        if re.search(r"\bA[\).:]\s", base) and re.search(r"\bB[\).:]\s", base):
-            return base.rstrip() + "\n\nReturn exactly one letter: A, B, C, or D."
-
-    opts = parse_options_any_format(options_val)
-    if opts is None:
-        return f"Question:\n{question}\n\nOptions:\n{str(options_val)}\n\nReturn exactly one letter: A, B, C, or D."
-
-    a,b,c,d = opts
-    return (
-        f"Question:\n{question.strip()}\n\n"
-        f"Answer Choices:\n"
-        f"A. {a}\n"
-        f"B. {b}\n"
-        f"C. {c}\n"
-        f"D. {d}\n\n"
-        f"Return exactly one letter: A, B, C, or D."
-    )
-
-def parse_answer_letter_strict(text: str):
-    if text is None:
-        return None
-    t = str(text)
-
-    m = re.search(r"Final:\s*([ABCD])\b", t, flags=re.IGNORECASE)
-    if m:
-        return m.group(1).upper()
-
-    m = re.search(r"Answer:\s*([ABCD])\b", t, flags=re.IGNORECASE)
-    if m:
-        return m.group(1).upper()
-
-    tail = t[-200:]
-    m = re.search(r"\b([ABCD])\b", tail, flags=re.IGNORECASE)
-    return m.group(1).upper() if m else None
-
-def reasoning_suffix_mcq():
-    return (
-        "\n\nGive a brief medical rationale (1-4 sentences). "
-        "Then on a new line write exactly: Final: <A/B/C/D>"
-    )
-
-
-# Inference + plots 
-def timed_call(fn, *args, **kwargs):
-    t0 = time.perf_counter()
-    out = fn(*args, **kwargs)
-    t1 = time.perf_counter()
-    return out, (t1 - t0)
-
-def mcq_two_stage_predict(llm, prompt: str, use_confidence_gate=True, conf_threshold=0.65):
-    raw_free, t_free = timed_call(
-        llm.generate_free,
-        prompt + reasoning_suffix_mcq()
-    )
-    pred_free = parse_answer_letter_strict(raw_free)
-
-    raw_scored = pred_scored = None
-    t_scored = None
-    conf = None
-    option_probs = None
-
-    if use_confidence_gate:
-        try: llm.set_task("mcq")
-        except Exception: pass
-        try: llm.set_mode("answer_only")
-        except Exception: pass
-
-        raw_scored, t_scored = timed_call(llm.generate, prompt)
-        pred_scored = parse_answer_letter_strict(raw_scored)
-        conf = getattr(llm, "last_confidence", None)
-        option_probs = getattr(llm, "last_option_probs", None)
-
-        if conf is not None and pred_scored in {"A","B","C","D"} and float(conf) >= conf_threshold:
-            final_pred = pred_scored
-            strategy = "scored_highconf"
-        else:
-            final_pred = pred_free if pred_free in {"A","B","C","D"} else pred_scored
-            strategy = "free_or_lowconf"
-
-        return {
-            "pred": final_pred,
-            "raw": raw_scored if strategy == "scored_highconf" else raw_free,
-            "raw_free": raw_free,
-            "pred_free": pred_free,
-            "raw_scored": raw_scored,
-            "pred_scored": pred_scored,
-            "confidence": float(conf) if conf is not None else None,
-            "option_probs": option_probs,
-            "t_free_s": float(t_free),
-            "t_scored_s": float(t_scored),
-            "latency_s": float(t_free) + float(t_scored),
-            "strategy": strategy,
-        }
-
-    return {
-        "pred": pred_free,
-        "raw": raw_free,
-        "raw_free": raw_free,
-        "pred_free": pred_free,
-        "raw_scored": None,
-        "pred_scored": None,
-        "confidence": None,
-        "option_probs": None,
-        "t_free_s": float(t_free),
-        "t_scored_s": None,
-        "latency_s": float(t_free),
-        "strategy": "free_only",
-    }
-
-
-def run_mcq_eval(df_mcq, llm, n=1000, use_confidence_gate=True, conf_threshold=0.65):
-    sample = df_mcq.sample(n=min(n, len(df_mcq)), random_state=SEED) if n else df_mcq
-    rows = []
-    for _, r in sample.iterrows():
-        prompt = render_mcq_prompt(str(r["question"]), r.get("options", None), r.get("prompt_text", None))
-        out = mcq_two_stage_predict(llm, prompt, use_confidence_gate=use_confidence_gate, conf_threshold=conf_threshold)
-        rows.append({
-            "question": str(r["question"]),
-            "options": r.get("options", None),
-            "gold": str(r["answer_label"]).strip().upper(),
-            **out,
-        })
-    return rows
-
-def plot_confusion(y_true, y_pred, labels, title="Confusion matrix"):
-    cm = confusion_matrix(y_true, y_pred, labels=labels)
-    fig, ax = plt.subplots(figsize=(5, 4))
-    im = ax.imshow(cm, interpolation="nearest")
-    ax.set_title(title)
-    ax.set_xlabel("Predicted")
-    ax.set_ylabel("True")
-    ax.set_xticks(np.arange(len(labels)), labels=labels)
-    ax.set_yticks(np.arange(len(labels)), labels=labels)
-    for i in range(cm.shape[0]):
-        for j in range(cm.shape[1]):
-            ax.text(j, i, str(cm[i, j]), ha="center", va="center")
-    fig.colorbar(im, ax=ax)
-    plt.tight_layout()
-    plt.show()
-
-def plot_latency(rows, title="Latency (seconds)"):
-    lat = [r.get("latency_s") for r in rows if r.get("latency_s") is not None]
-    if not lat:
-        print("No latency_s found.")
-        return
-    lat = np.array(lat, dtype=float)
-    p50, p95 = np.percentile(lat, 50), np.percentile(lat, 95)
-    plt.figure(figsize=(6, 4))
-    plt.hist(lat, bins=30)
-    plt.title(f"{title} | p50={p50:.3f}s p95={p95:.3f}s mean={lat.mean():.3f}s")
-    plt.xlabel("seconds")
-    plt.ylabel("count")
-    plt.tight_layout()
-    plt.show()
-
-def plot_confidence_accuracy(rows, title="Confidence vs accuracy", n_bins=10):
-    conf, corr = [], []
-    for r in rows:
-        c = r.get("confidence", None)
-        p, g = r.get("pred"), r.get("gold")
-        if c is None:
-            continue
-        if p not in {"A","B","C","D"} or g not in {"A","B","C","D"}:
-            continue
-        conf.append(float(c))
-        corr.append(1.0 if p == g else 0.0)
-
-    if not conf:
-        print("No usable confidence values.")
-        return
-
-    conf = np.array(conf)
-    corr = np.array(corr)
-
-    bins = np.linspace(0, 1, n_bins + 1)
-    bin_ids = np.digitize(conf, bins) - 1
-
-    xs, ys, counts = [], [], []
-    for b in range(n_bins):
-        mask = bin_ids == b
-        if mask.sum() == 0:
-            continue
-        xs.append((bins[b] + bins[b+1]) / 2)
-        ys.append(corr[mask].mean())
-        counts.append(mask.sum())
-
-    plt.figure(figsize=(6, 4))
-    plt.plot(xs, ys, marker="o")
-    plt.plot([0, 1], [0, 1], linestyle="--")
-    plt.title(title)
-    plt.xlabel("confidence bin center")
-    plt.ylabel("accuracy in bin")
-    plt.ylim(0, 1)
-    plt.tight_layout()
-    plt.show()
-
-    plt.figure(figsize=(6, 3))
-    plt.bar(range(len(counts)), counts)
-    plt.title(title + " (bin counts)")
-    plt.xlabel("bin index (low→high confidence)")
-    plt.ylabel("count")
-    plt.tight_layout()
-    plt.show()
-
-
-def evaluate_mcq_rows(mcq_rows):
-    valid = [r for r in mcq_rows if r.get("pred") in {"A","B","C","D"} and r.get("gold") in {"A","B","C","D"}]
-    y_true = [r["gold"] for r in valid]
-    y_pred = [r["pred"] for r in valid]
-
-    print("Pred distribution:", Counter(y_pred))
-    print("Accuracy:", accuracy_score(y_true, y_pred), f"(n={len(valid)})")
-    print("Balanced accuracy:", balanced_accuracy_score(y_true, y_pred))
-    print(classification_report(y_true, y_pred, labels=["A","B","C","D"], zero_division=0))
-
-    plot_confusion(y_true, y_pred, ["A","B","C","D"], "MCQ confusion matrix")
-    plot_latency(valid, "MCQ latency")
-    plot_confidence_accuracy(valid, "MCQ confidence vs accuracy")
-
-
-# Surrogate + ELI5 
-from IPython.display import display
-
-STOP_PHRASES = [
-    "Return exactly one letter", "Answer Choices", "Answer:", "Rationale:", "Final:",
-    "Give a brief medical rationale", "Then on a new line write exactly"
-]
-def clean_for_surrogate(text: str) -> str:
-    t = str(text or "")
-    for p in STOP_PHRASES:
-        t = t.replace(p, " ")
-    t = re.sub(r"\s+", " ", t).strip()
-    return t
-
-def build_surrogate_text_from_row(r):
-    q = r["question"]
-    opts = parse_options_any_format(r.get("options", None))
-    if opts is None:
-        return clean_for_surrogate(q + "\n" + str(r.get("options","")))
-    a,b,c,d = opts
-    return clean_for_surrogate(f"{q}\nA. {a}\nB. {b}\nC. {c}\nD. {d}")
-
-def train_surrogate_mimic_llm(mcq_rows, top=25):
-    X, y = [], []
-    for r in mcq_rows:
-        if r.get("pred") in {"A","B","C","D"}:
-            X.append(build_surrogate_text_from_row(r))
-            y.append(r["pred"])
-
-    if len(set(y)) < 2:
-        print("Not enough class variety to train surrogate.")
-        return None
-
-    Xtr, Xte, ytr, yte = train_test_split(X, y, test_size=0.2, random_state=SEED, stratify=y)
-
-    pipe = make_pipeline(
-        TfidfVectorizer(ngram_range=(1,2), min_df=2, max_df=0.95),
-        LogisticRegression(max_iter=3000)
-    )
-    pipe.fit(Xtr, ytr)
-    fidelity = pipe.score(Xte, yte)
-    print(f"[Surrogate] Fidelity to LLM predictions: {fidelity:.3f} (n_test={len(yte)})")
-
-    print("\n[Surrogate] Global weights:")
-    display(eli5.show_weights(pipe, top=top))
-    return pipe
-
-def show_local_eli5(pipe, text, top=20):
-    doc = clean_for_surrogate(text)
-    display(eli5.show_prediction(pipe, doc, top=top))
-
-def explain_some_errors(pipe, mcq_rows, n=3):
-    shown = 0
-    for r in mcq_rows:
-        if r.get("pred") in {"A","B","C","D"} and r.get("gold") in {"A","B","C","D"} and r["pred"] != r["gold"]:
-            print("\n--- ERROR CASE ---")
-            print("Gold:", r["gold"], "| Pred:", r["pred"], "| Strategy:", r.get("strategy"))
-            txt = build_surrogate_text_from_row(r)
-            show_local_eli5(pipe, txt, top=20)
-            shown += 1
-            if shown >= n:
-                break
-
-
-# Main run 
-def main():
-    np.random.seed(SEED)
-
-    if HF_TOKEN is None or not str(HF_TOKEN).strip():
-        print("[Warning] HF_TOKEN env var not set. If your model is gated/private, set HF_TOKEN.")
-
-    print("\n== Load data ==")
-    df = load_compiled_df(DATA_PATH)
-    mcq, yn = split_mcq_yn(df)
-
-    if len(mcq) == 0:
-        raise SystemExit("No MCQ rows found. Check DATA_PATH and dataset columns.")
-
-    print("\n== Load medical wrapper ==")
-    from medical_llm_wrapper_fixed import MedicalLLMWrapper
+    print(render_mcq_prompt(ex["question"], ex["options"])[:600])
 
     llm = MedicalLLMWrapper(
         model_name=MODEL_ID,
@@ -446,46 +615,100 @@ def main():
         torch_dtype=None,
     )
 
-    # For accuracy evaluation: answer_only (fast)
+    llm.set_mode("answer_only")
+
+    llm.get_model_info()
+
+    mcq_ans_acc = eval_mcq_answer_only(mcq, n=1000)
+
+    yn_ans_acc  = eval_yn_answer_only(yn, n=600) if len(yn) else None
+
+    mcq_bundle = None
+
+    if len(mcq):
+        mcq_sur = collect_mcq_for_surrogates(mcq, n=1500)
+        print("MCQ surrogate rows:", len(mcq_sur))
+
+        mcq_bundle = {
+            "mimic": train_surrogate_return_parts(mcq_sur["text"], mcq_sur["pred"], title="MCQ mimic_llm", top=30),
+            "gold":  train_surrogate_return_parts(mcq_sur["text"], mcq_sur["gold"], title="MCQ predict_gold", top=30),
+            "error": train_surrogate_return_parts(mcq_sur["text"], mcq_sur["wrong"], title="MCQ predict_error", top=30),
+        }
+
+    yn_bundle = None
+
+    if len(yn):
+        yn_sur = collect_yn_for_surrogates(yn, n=1500)
+        print("Y/N surrogate rows:", len(yn_sur))
+
+        yn_bundle = {
+            "mimic": train_surrogate_return_parts(yn_sur["text"], yn_sur["pred"], title="Y/N mimic_llm", top=30),
+            "gold":  train_surrogate_return_parts(yn_sur["text"], yn_sur["gold"], title="Y/N predict_gold", top=30),
+            "error": train_surrogate_return_parts(yn_sur["text"], yn_sur["wrong"], title="Y/N predict_error", top=30),
+        }
+
+    print("Inspecting mcq_bundle contents:")
+
+    debug_inspect_bundle(mcq_bundle)
+
     try:
-        llm.set_mode("answer_only")
+        wrong_df = mcq_sur[mcq_sur["wrong"] == 1].head(5)
     except Exception:
-        pass
+        try:
+            wrong_df = wrong_cases
+        except Exception:
+            wrong_df = None
 
-    print("\n== Run evaluation ==")
-    global mcq_rows 
-    mcq_rows = run_mcq_eval(mcq, llm, n=N_SAMPLES, use_confidence_gate=USE_CONFIDENCE_GATE, conf_threshold=CONF_THRESHOLD)
-
-    print("\n==============================")
-    print("Base accuracy (FREE reasoning, no constraints)")
-    base_free = [r for r in mcq_rows if r.get("pred_free") in {"A","B","C","D"} and r.get("gold") in {"A","B","C","D"}]
-    if base_free:
-        print("Accuracy:", accuracy_score([r["gold"] for r in base_free], [r["pred_free"] for r in base_free]), f"(n={len(base_free)})")
+    if wrong_df is None or len(wrong_df) == 0:
+        print("No wrong cases found to explain.")
     else:
-        print("No valid free predictions found.")
+        for which in ("mimic","gold","error"):
+            print(f"\n\n=== Explanations for '{which}' ===")
+            obj = mcq_bundle.get(which) if isinstance(mcq_bundle, dict) else None
+            tf, clf = extract_tf_clf_from_obj(obj)
+            if tf is None or clf is None:
+                print(f"[WARN] could not extract tf/clf automatically for '{which}'. Attempting additional heuristics...")
+                # try if mcq_bundle[which] is a Pipeline and pull first/last step
+                val = mcq_bundle.get(which)
+                try:
+                    if hasattr(val, "named_steps"):
+                        steps = val.named_steps
+                        print("named_steps keys:", list(steps.keys()))
+                    if hasattr(val, "steps"):
+                        print("steps keys:", [s[0] for s in val.steps])
+                except Exception:
+                    pass
+                # attempt to see if bundle contains tf/clf separately at top-level (unlikely)
+                tf_alt = getattr(mcq_bundle, "tf", None) or mcq_bundle.get("tf") if isinstance(mcq_bundle, dict) else None
+                clf_alt = getattr(mcq_bundle, "clf", None) or mcq_bundle.get("clf") if isinstance(mcq_bundle, dict) else None
+                if tf_alt is not None and clf_alt is not None:
+                    tf, clf = tf_alt, clf_alt
 
-    print("\n==============================")
-    print("Base accuracy (SCORED constrained answer_only, no confidence gate)")
-    base_scored = [r for r in mcq_rows if r.get("pred_scored") in {"A","B","C","D"} and r.get("gold") in {"A","B","C","D"}]
-    if base_scored:
-        print("Accuracy:", accuracy_score([r["gold"] for r in base_scored], [r["pred_scored"] for r in base_scored]), f"(n={len(base_scored)})")
-    else:
-        print("No valid scored predictions found.")
+            if tf is None or clf is None:
+                print(f"[ERROR] still no tf/clf for '{which}'. Repr of mcq_bundle['{which}'] shown above. Falling back to best-effort per-example contributions using any available classifier in bundle.")
+                # try to find any classifier in the whole bundle dict
+                found_tf, found_clf = None, None
+                for k in (mcq_bundle.keys() if isinstance(mcq_bundle, dict) else []):
+                    t_tmp, c_tmp = extract_tf_clf_from_obj(mcq_bundle[k])
+                    if c_tmp is not None and found_clf is None:
+                        found_tf, found_clf = t_tmp, c_tmp
+                if found_clf is not None:
+                    print(f"Using classifier found under key (first match).")
+                    tf, clf = found_tf, found_clf
+                else:
+                    print("No classifier found anywhere in bundle. Can't compute contributions.")
+                    tf, clf = None, None
 
-    print("\n==============================")
-    print("Final accuracy (selected strategy)")
-    evaluate_mcq_rows(mcq_rows)
-
-    if TRAIN_SURROGATE:
-        print("\n== Train surrogate for explanations ==")
-        mcq_pipe = train_surrogate_mimic_llm(mcq_rows, top=SURROGATE_TOP)
-        if mcq_pipe is not None:
-            if EXPLAIN_ERRORS > 0:
-                explain_some_errors(mcq_pipe, mcq_rows, n=EXPLAIN_ERRORS)
-        else:
-            print("Skipping ELI5 explanations (surrogate not trained).")
-
-    print("\nDone.")
+            # Explain each wrong example with the extracted tf/clf
+            for _, r in wrong_df.iterrows():
+                print("\n-----------------------------")
+                print("Q:", r.get("question"))
+                text = r.get("text") or r.get("question")
+                if tf is None or clf is None:
+                    print("No tf/clf available — skipping eli5, printing raw text snippet:")
+                    print(text[:400])
+                else:
+                    explain_with_fallback(tf, clf, text, top=20)
 
 
 if __name__ == "__main__":
