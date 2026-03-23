@@ -3,6 +3,6 @@ Value function extensions for TokenSHAP.
 Includes placeholders and experimental scoring methods.
 """
 
-from .correctness_aware import CorrectnessAwareVectorizer
+from .correctness_value import CorrectnessValueFunction
 
-__all__ = ["CorrectnessAwareVectorizer"]
+__all__ = ["CorrectnessValueFunction"]

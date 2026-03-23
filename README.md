@@ -1,135 +1,184 @@
-# Medical LLM Interpretability Toolkit
+# Medical LLM XAI Toolkit
 
-A unified toolkit for explaining predictions from medical language models using multiple interpretability methods.
+A unified explainability toolkit for medical question-answering language models. Combines multiple XAI methods (LIME, Integrated Gradients, TokenSHAP, ELI5) into a single interactive interface, enabling users to generate, compare, and analyze token-level explanations across methods.
 
 ## Features
 
-- **Model-Agnostic Wrapper**: Standardized interface for any HuggingFace medical LLM
-- **Integrated Gradients**: Token-level attribution for model predictions
-- **TokenSHAP**: SHAP values for medical QA tasks
-- **Easy to Use**: Clean API with minimal boilerplate
-- **Extensible**: Add new interpretability methods easily
-
-## Installation
-
-```bash
-# Clone the repository
-git clone https://github.com/jChong02/sjsu-data298.git
-cd sjsu-data298
-
-# Install in development mode
-pip install -e .
-```
+- **Model-Agnostic Wrapper**: Standardized interface for any HuggingFace causal LLM with constrained generation and confidence extraction
+- **Multiple XAI Methods**: LIME, Integrated Gradients, TokenSHAP (with QA-aware extensions), ELI5
+- **Interactive UI**: Streamlit-based web app with per-method configuration, cross-method comparison, and consensus analysis
+- **Unified Evaluation**: Single script for faithfulness (deletion AUC) and stability (overlap@k) evaluation across models and methods
+- **Extensible**: Modular architecture — add new XAI methods without modifying core application code
 
 ## Project Structure
 
 ```
-sjsu-data298/
-├── TokenSHAP-QA/                # TokenSHAP implementation
-│   ├── token_shap/              # Core TokenSHAP code
-│   └── tokenshap_extensions/    # QA-specific extensions
-├── medical_llm_wrapper.py       # Model-agnostic wrapper
-├── integrated_gradients.py      # IG base implementation
-├── medical_ig_adapter.py        # IG adapter for medical wrapper
-├── tokenshap_adapter.py         # TokenSHAP adapter
-├── notebooks/                   # Jupyter demos
-│   ├── demo_wrapper.ipynb
-│   └── demo_ig.ipynb
-├── examples/                    # Standalone examples
-│   └── basic_usage.py
-├── data/                        # Dataset files
-└── setup.py                     # Package configuration
-
+sjsu_data298/
+├── medical_llm_toolkit/              # Core library
+│   ├── __init__.py
+│   ├── wrapper.py                    # MedicalLLMWrapper
+│   └── explainers/
+│       ├── lime.py                   # LIME adapter
+│       ├── integrated_gradients.py   # IG adapter
+│       └── tokenshap/
+│           ├── token_shap/           # Upstream TokenSHAP (untouched)
+│           └── extensions/           # QA-aware perturbation + correctness value function
+│               ├── qa_tokenshap.py
+│               ├── extractors.py
+│               └── value_functions/
+│                   └── correctness_value.py
+├── app/                              # Streamlit UI
+│   ├── main.py                       # App entry point
+│   ├── registry.py                   # Explainer plugin system
+│   ├── visualization.py             # Token highlights + chart helpers
+│   └── explainers/                   # Per-method UI components
+│       ├── lime_ui.py
+│       ├── ig_ui.py
+│       └── tokenshap_ui.py
+├── eval/                             # Evaluation framework
+│   └── run_evaluation.py             # Unified faithfulness + stability evaluation
+├── notebooks/                        # Jupyter demos + experimentation
+├── data/                             # Dataset files
+├── setup.py
+├── requirements.txt
+└── run.bat                           # Windows launcher
 ```
 
 ## Quick Start
 
-### 1. Load a Medical LLM
+### Installation
+
+```bash
+git clone https://github.com/jChong02/sjsu-data298.git
+cd sjsu-data298
+pip install -e .
+pip install streamlit plotly
+```
+
+### Launch the UI
+
+```bash
+# Windows
+run.bat
+
+# Or directly
+streamlit run app/main.py
+```
+
+Then open `localhost:8501` in your browser.
+
+### Programmatic Usage
 
 ```python
-from medical_llm_wrapper import load_medical_llm
+from medical_llm_toolkit.wrapper import MedicalLLMWrapper
 
 # Load model
-wrapper = load_medical_llm(
-    "FreedomIntelligence/Apollo-2B",
-    device="cuda"
+wrapper = MedicalLLMWrapper("FreedomIntelligence/Apollo-2B", device="cuda")
+wrapper.set_task("yn")
+wrapper.set_mode("answer_rationale")
+
+# Generate
+response = wrapper.generate(
+    "Does aspirin reduce the risk of colorectal cancer?\n\n"
+    "Answer Choices:\nA. Yes\nB. No"
 )
-
-# Set task type
-wrapper.set_task("mcq")  # or "yn" for Yes/No, "free" for open-ended
+print(response)
+print(wrapper.last_option_probs)
 ```
-
-### 2. Get Predictions
 
 ```python
-prompt = """Which vitamin deficiency causes scurvy?
-A) Vitamin A
-B) Vitamin B12
-C) Vitamin C
-D) Vitamin D
+# LIME
+from medical_llm_toolkit.explainers.lime import MedicalLIME
 
-Answer:"""
-
-answer = wrapper.generate(prompt)
-print(f"Answer: {answer}")
+lime = MedicalLIME(wrapper, n_samples=100, kernel_width=0.75)
+result = lime.analyze(prompt, target_class="A", visualize=True)
 ```
-
-### 3. Explain with Integrated Gradients
 
 ```python
-from medical_ig_adapter import MedicalIntegratedGradients
+# Integrated Gradients
+from medical_llm_toolkit.explainers.integrated_gradients import MedicalIntegratedGradients
 
-ig = MedicalIntegratedGradients(wrapper)
-result = ig.attribute(prompt, target_class="C")
-
-print(f"Target probability: {result['target_probability']:.4f}")
-print(f"Top tokens: {result['tokens'][:5]}")
+ig = MedicalIntegratedGradients(wrapper, n_steps=50)
+result = ig.attribute(prompt, target_class="A")
 ```
-
-### 4. Explain with TokenSHAP
 
 ```python
-from tokenshap_adapter import MedicalTokenSHAP
+# TokenSHAP (with correctness-aware value function)
+from medical_llm_toolkit.explainers.tokenshap.token_shap.token_shap import StringSplitter
+from medical_llm_toolkit.explainers.tokenshap.extensions.qa_tokenshap import QATokenSHAP
+from medical_llm_toolkit.explainers.tokenshap.extensions.value_functions.correctness_value import CorrectnessValueFunction
 
-shap = MedicalTokenSHAP(wrapper)
-result = shap.explain(prompt, target_class="C", n_samples=100)
-
-print(f"SHAP values: {result['shap_values']}")
+wrapper.set_mode("answer_only")
+vec = CorrectnessValueFunction(correct_label="A", mode="prob")
+ts = QATokenSHAP(model=wrapper, splitter=StringSplitter(), vectorizer=vec)
+results_df = ts.analyze(prompt, sampling_ratio=0.5, max_combinations=100)
 ```
 
-## Examples
+## Evaluation
 
-See `examples/basic_usage.py` for a complete working example.
+Run faithfulness and stability evaluation across models and methods:
 
-See `notebooks/` for interactive demos:
-- `demo_wrapper.ipynb` - Wrapper functionality
-- `demo_ig.ipynb` - Integrated Gradients explanations
+```bash
+# All methods on Apollo-2B, Y/N + MCQ faithfulness
+python eval/run_evaluation.py --models Apollo-2B --eval-type faithfulness --tasks yn mcq
+
+# Stability on Y/N
+python eval/run_evaluation.py --models Apollo-2B --eval-type stability --tasks yn
+
+# Cross-model comparison
+python eval/run_evaluation.py --models Apollo-2B BioMistral-7B --eval-type faithfulness --tasks yn
+
+# Specific methods only
+python eval/run_evaluation.py --methods lime ig --tasks yn --eval-type faithfulness
+```
+
+Results are saved as CSVs in `eval/results/`.
 
 ## Supported Models
 
-Works with any HuggingFace causal language model:
-- **Medical LLMs**: MedGemma, BioMistral, BioMedLM, Apollo
-- **General LLMs**: Llama, Mistral, GPT, etc.
+Tested with:
+- **Apollo-2B** (FreedomIntelligence/Apollo-2B)
+- **BioMistral-7B** (BioMistral/BioMistral-7B)
+- **MedGemma-4B** (google/medgemma-4b-it) — requires HF token
+- **BioMedLM** (stanford-crfm/BioMedLM)
 
-## Citation
+Works with any HuggingFace causal language model.
 
-If you use this toolkit, please cite:
+## Adding a New XAI Method
 
-```bibtex
-@software{medical_llm_toolkit,
-  title = {Medical LLM Interpretability Toolkit},
-  author = {DATA 298A Team},
-  year = {2025},
-  url = {https://github.com/jChong02/sjsu-data298}
-}
+1. Create `app/explainers/your_method_ui.py`:
+
+```python
+from app.registry import ExplainerUI, register
+
+class YourMethodUI(ExplainerUI):
+    name = "your_method"
+    display_name = "Your Method"
+    description = "One-line description."
+    supported_tasks = {"yn", "mcq"}
+
+    def render_config(self, key_prefix):
+        # Streamlit widgets for method params
+        return {"param": value}
+
+    def run(self, wrapper, prompt, target_class, ground_truth, params):
+        # Run your method, return result dict with 'tokens' and 'attributions'
+        return {"tokens": [...], "attributions": [...]}
+
+    def render_results(self, result):
+        # Render with Streamlit
+        pass
+
+register(YourMethodUI())
 ```
 
-## Contributing
+2. Add `from . import your_method_ui` to `app/explainers/__init__.py`.
 
-This project integrates TokenSHAP from [TokenSHAP-QA](https://github.com/jChong02/TokenSHAP-QA).
+The new method automatically appears as a tab in the UI.
 
 ## Acknowledgments
 
-- TokenSHAP implementation from TokenSHAP-QA repository
+- TokenSHAP: Karczmarz et al. — [TokenSHAP](https://github.com/KarczmarzJakub/TokenSHAP)
+- LIME: Ribeiro et al. (2016)
+- Integrated Gradients: Sundararajan et al. (2017)
 - Built on HuggingFace Transformers
-- Integrated Gradients based on Sundararajan et al. (2017)
