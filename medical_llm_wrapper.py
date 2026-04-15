@@ -6,7 +6,13 @@ Model-agnostic wrapper for medical language models providing structured
 medical QA tasks.
 
 Implements a lightweight constraint mechanism using Hugging Face
-LogitsProcessors to enforce valid answer tokens and generate concise rationales.
+LogitsProcessors to enforce valid answer tokens, and supports two
+reasoning strategies for rationale generation:
+
+  - Chain-of-Thought (CoT): single linear rationale (default)
+  - Tree-of-Thought (ToT): N candidate reasoning branches generated via
+    sampling, ranked by mean log-probability, best branch selected, then
+    constrained answer + rationale produced from that branch.
 
 Compatible with any HuggingFace causal language model including:
 - Google MedGemma (medgemma-4b-it)
@@ -46,23 +52,34 @@ class MedicalLLMWrapper:
     """
     Model-agnostic medical LLM wrapper for constrained answer + rationale generation.
 
-    Supports two modes:
+    Supports two generation modes (set_mode):
       - 'answer_rationale': (default) full reasoning output
       - 'answer_only'    : only generates answer token and confidence
-    
-    Supports three task types:
+
+    Supports two reasoning strategies (set_reasoning_strategy):
+      - 'cot': Chain-of-Thought — single linear rationale (default)
+      - 'tot': Tree-of-Thought  — N branches sampled, scored by log-prob,
+               best selected, then answer + rationale generated from it
+
+    Supports three task types (set_task):
       - 'yn'  : Yes/No questions (forces first token A or B)
       - 'mcq' : Multiple-choice questions (forces A/B/C/D)
       - 'free': Unconstrained free-text answers
 
-    Methods:
-        set_task(task_type): set task type before generation
-        generate(prompt): produce structured answer + rationale output
+    Key methods:
+        set_task(task_type)
+        set_mode(mode)
+        set_reasoning_strategy(strategy)
+        configure_tot(n_branches, max_thought_tokens)
+        generate(prompt)
 
     Attributes (after generation):
         last_answer (str)
         last_confidence (float)
         last_option_probs (dict)
+        last_thoughts (list[str])        — ToT only: all candidate branches
+        last_thought_scores (list[float]) — ToT only: log-prob score per branch
+        last_best_thought (str)          — ToT only: selected branch
         model_name (str)
         model_dtype (torch.dtype)
     """
@@ -130,7 +147,19 @@ class MedicalLLMWrapper:
         self.last_answer = None
         self.last_confidence = None
         self.last_option_probs = None
-        
+
+        # Reasoning strategy: 'cot' (Chain-of-Thought) or 'tot' (Tree-of-Thought)
+        self.reasoning_strategy = "cot"
+
+        # Tree-of-Thought configuration
+        self.tot_n_branches = 3        # number of candidate thought branches
+        self.tot_max_thought_tokens = 80  # max tokens per thought branch
+
+        # ToT runtime outputs (populated after ToT generation)
+        self.last_thoughts = None
+        self.last_thought_scores = None
+        self.last_best_thought = None
+
         print(f"[MedicalLLMWrapper] ✓ Model loaded successfully")
         print(f"[MedicalLLMWrapper]   Device: {self.device}")
         print(f"[MedicalLLMWrapper]   Dtype: {self.model_dtype}")
@@ -174,12 +203,36 @@ class MedicalLLMWrapper:
             mode = "answer_rationale"
         self.mode = mode
 
+    def set_reasoning_strategy(self, strategy):
+        """
+        Set the reasoning strategy used during answer_rationale generation:
+          - 'cot': Chain-of-Thought (default) — single linear rationale
+          - 'tot': Tree-of-Thought — N branches generated, scored by log-prob,
+                   best branch selected, then answer + rationale produced
+        """
+        if strategy not in {"cot", "tot"}:
+            print(f"[Warning] Unknown reasoning strategy '{strategy}', defaulting to 'cot'")
+            strategy = "cot"
+        self.reasoning_strategy = strategy
+
+    def configure_tot(self, n_branches=3, max_thought_tokens=80):
+        """
+        Configure Tree-of-Thought hyperparameters.
+
+        Args:
+            n_branches: number of candidate reasoning branches to generate (default 3)
+            max_thought_tokens: max new tokens per thought branch (default 80)
+        """
+        self.tot_n_branches = n_branches
+        self.tot_max_thought_tokens = max_thought_tokens
+
     def generate(self, prompt):
         """
         Unified generate method.
-        Behavior depends on self.mode:
-          - 'answer_rationale': returns full answer + rationale
-          - 'answer_only': returns only the answer and stores confidence internally
+        Behavior depends on self.mode and self.reasoning_strategy:
+          - mode 'answer_only'    : returns only the answer with confidence
+          - mode 'answer_rationale' + strategy 'cot': Chain-of-Thought rationale
+          - mode 'answer_rationale' + strategy 'tot': Tree-of-Thought rationale
         """
         if self.mode == "answer_only":
             answer, conf, option_probs = self.generate_with_confidence(prompt)
@@ -187,6 +240,8 @@ class MedicalLLMWrapper:
             self.last_confidence = conf
             self.last_option_probs = option_probs
             return f"Answer: {answer}"
+        elif self.reasoning_strategy == "tot":
+            return self._generate_with_tree_of_thought(prompt)
         else:
             return self._generate_with_rationale(prompt)
 
@@ -246,13 +301,7 @@ class MedicalLLMWrapper:
                 )
             rationale = self.tokenizer.decode(output2[0, inputs2["input_ids"].shape[1]:], skip_special_tokens=True).strip()
             
-            # Clean up rationale text - remove common artifacts
-            rationale = rationale.split("Final Answer")[0]
-            rationale = rationale.split("Question:")[0]
-            rationale = rationale.split("\n\nAnswer:")[0]
-            rationale = rationale.split("\n\nA)")[0]
-            rationale = rationale.strip()
-            rationale = re.sub(r"\s{2,}", " ", rationale).strip()
+            rationale = self._clean_rationale(rationale)
 
             self.last_answer = answer
             self.last_confidence = None
@@ -262,6 +311,163 @@ class MedicalLLMWrapper:
         else:
             self.last_answer = answer
             return answer
+
+    def _clean_rationale(self, rationale):
+        """Remove common generation artifacts from a rationale string."""
+        rationale = rationale.split("Final Answer")[0]
+        rationale = rationale.split("Question:")[0]
+        rationale = rationale.split("\n\nAnswer:")[0]
+        rationale = rationale.split("\n\nA)")[0]
+        rationale = rationale.strip()
+        return re.sub(r"\s{2,}", " ", rationale).strip()
+
+    def _generate_thought_branch(self, thought_prompt, max_tokens):
+        """
+        Generate one candidate reasoning branch from thought_prompt.
+        Uses sampling so each call produces a different reasoning path.
+        """
+        inputs = self.tokenizer(thought_prompt, return_tensors="pt").to(self.device)
+        with torch.no_grad():
+            output = self.model.generate(
+                **inputs,
+                max_new_tokens=max_tokens,
+                do_sample=True,
+                temperature=0.8,
+                top_p=0.9,
+                pad_token_id=self.tokenizer.pad_token_id or self.tokenizer.eos_token_id,
+                eos_token_id=self.tokenizer.eos_token_id,
+            )
+        thought = self.tokenizer.decode(
+            output[0, inputs["input_ids"].shape[1]:], skip_special_tokens=True
+        ).strip()
+        # Truncate at any answer/question boundaries
+        for stop in ["\n\nAnswer:", "\n\nQuestion:", "Final Answer", "\n\nA)"]:
+            thought = thought.split(stop)[0]
+        return re.sub(r"\s{2,}", " ", thought).strip()
+
+    def _score_thought_logprob(self, context, thought):
+        """
+        Score a thought by its mean log-probability given the context.
+
+        Runs one forward pass with label masking so only thought tokens
+        contribute to the NLL.  Higher return value = model considers
+        this reasoning more coherent.
+
+        Args:
+            context: the prompt string that precedes the thought
+            thought: the candidate reasoning string to evaluate
+
+        Returns:
+            float: mean log-probability score (higher is better)
+        """
+        full_text = context + thought
+        full_inputs = self.tokenizer(full_text, return_tensors="pt").to(self.device)
+        context_len = self.tokenizer(context, return_tensors="pt")["input_ids"].shape[1]
+
+        # Mask context positions so loss is computed only over thought tokens
+        labels = full_inputs["input_ids"].clone()
+        labels[0, :context_len] = -100
+
+        with torch.no_grad():
+            outputs = self.model(**full_inputs, labels=labels)
+
+        loss = outputs.loss
+        if torch.isnan(loss) or torch.isinf(loss):
+            return float("-inf")
+        return -loss.item()  # negate NLL → higher = better
+
+    def _generate_with_tree_of_thought(self, prompt):
+        """
+        Generate a response using Tree-of-Thought reasoning.
+
+        Algorithm:
+          1. Branch  — sample tot_n_branches independent reasoning thoughts
+          2. Score   — rank each by mean log-probability (model coherence proxy)
+          3. Select  — keep the highest-scoring thought
+          4. Solve   — run constrained answer generation conditioned on best thought
+          5. Explain — generate final rationale
+
+        Populates:
+            self.last_thoughts        — all generated thought branches
+            self.last_thought_scores  — corresponding log-prob scores
+            self.last_best_thought    — the selected branch
+
+        Returns:
+            str: "Answer: <X>\\nThought: <best>\\nRationale: <explanation>"
+        """
+        thought_prompt = f"{prompt}\n\nLet me reason through this step by step:"
+
+        # --- Step 1 & 2: Branch and Score ---
+        thoughts = []
+        scores = []
+        for i in range(self.tot_n_branches):
+            thought = self._generate_thought_branch(
+                thought_prompt, max_tokens=self.tot_max_thought_tokens
+            )
+            score = self._score_thought_logprob(thought_prompt, thought)
+            thoughts.append(thought)
+            scores.append(score)
+            print(f"[ToT] Branch {i + 1}/{self.tot_n_branches} | score: {score:.4f}")
+
+        # --- Step 3: Select ---
+        best_idx = scores.index(max(scores))
+        best_thought = thoughts[best_idx]
+        print(f"[ToT] Selected branch {best_idx + 1} (score: {scores[best_idx]:.4f})")
+
+        self.last_thoughts = thoughts
+        self.last_thought_scores = scores
+        self.last_best_thought = best_thought
+        self.last_confidence = None
+        self.last_option_probs = None
+
+        if self.task_type in {"yn", "mcq"}:
+            # --- Step 4: Constrained answer conditioned on best thought ---
+            answer_prompt = (
+                f"{prompt}\n\n"
+                f"Reasoning: {best_thought}\n\n"
+                "Based on the above reasoning, Answer:"
+            )
+            allowed_ids = self.AB_IDS if self.task_type == "yn" else self.ABCD_IDS
+            inputs = self.tokenizer(answer_prompt, return_tensors="pt").to(self.device)
+            processors = LogitsProcessorList(
+                [EnforceAnswerThenRationaleProcessor(allowed_ids)]
+            )
+            with torch.no_grad():
+                output = self.model.generate(
+                    **inputs,
+                    max_new_tokens=1,
+                    logits_processor=processors,
+                    pad_token_id=self.tokenizer.pad_token_id or self.tokenizer.eos_token_id,
+                    eos_token_id=self.tokenizer.eos_token_id,
+                )
+            answer = self.tokenizer.decode(
+                output[0, inputs["input_ids"].shape[1]:], skip_special_tokens=True
+            ).strip()
+
+            # --- Step 5: Rationale ---
+            rationale_prompt = f"{answer_prompt} {answer}\n\nRationale:"
+            inputs2 = self.tokenizer(rationale_prompt, return_tensors="pt").to(self.device)
+            with torch.no_grad():
+                output2 = self.model.generate(
+                    **inputs2,
+                    max_new_tokens=150,
+                    do_sample=True,
+                    temperature=0.7,
+                    top_p=0.9,
+                    pad_token_id=self.tokenizer.pad_token_id or self.tokenizer.eos_token_id,
+                    eos_token_id=self.tokenizer.eos_token_id,
+                )
+            rationale = self.tokenizer.decode(
+                output2[0, inputs2["input_ids"].shape[1]:], skip_special_tokens=True
+            ).strip()
+            rationale = self._clean_rationale(rationale)
+
+            self.last_answer = answer
+            return f"Answer: {answer}\nThought: {best_thought}\nRationale: {rationale}"
+        else:
+            # Free-form: best thought is the full response
+            self.last_answer = best_thought
+            return best_thought
 
     def generate_with_confidence(self, prompt):
         """
@@ -362,6 +568,9 @@ class MedicalLLMWrapper:
             "dtype": str(self.model_dtype),
             "task_type": self.task_type,
             "mode": self.mode,
+            "reasoning_strategy": self.reasoning_strategy,
+            "tot_n_branches": self.tot_n_branches,
+            "tot_max_thought_tokens": self.tot_max_thought_tokens,
             "num_parameters": sum(p.numel() for p in self.model.parameters()),
             "AB_token_ids": self.AB_IDS,
             "ABCD_token_ids": self.ABCD_IDS
