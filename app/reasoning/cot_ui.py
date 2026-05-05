@@ -89,15 +89,25 @@ class ChainOfThoughtUI(ReasoningUI):
         return cot.extract(prompt, task_type=task_type)
 
     def render_results(self, result: Dict[str, Any], ground_truth: Optional[str] = None):
-        # Header metrics
-        cols = st.columns(4)
-        cols[0].metric("Answer", result.get("answer") or "—")
-        if result.get("confidence") is not None:
-            cols[1].metric("Confidence", f"{result['confidence']:.4f}")
-        if ground_truth:
-            correct = result.get("answer") == ground_truth
-            cols[2].metric("Ground Truth", ground_truth, delta="✓" if correct else "✗")
-        cols[3].metric("Strategy", result.get("task_type", "—"))
+        is_free = result.get("task_type") == "free"
+
+        # Header metrics — for constrained tasks the answer is a single letter,
+        # so a metric widget makes sense. For free responses the answer is prose,
+        # which we render as its own block below.
+        if is_free:
+            cols = st.columns(2)
+            cols[0].metric("Task Type", "Free Response")
+            if result.get("confidence") is not None:
+                cols[1].metric("Confidence", f"{result['confidence']:.4f}")
+        else:
+            cols = st.columns(4)
+            cols[0].metric("Answer", result.get("answer") or "—")
+            if result.get("confidence") is not None:
+                cols[1].metric("Confidence", f"{result['confidence']:.4f}")
+            if ground_truth:
+                correct = result.get("answer") == ground_truth
+                cols[2].metric("Ground Truth", ground_truth, delta="✓" if correct else "✗")
+            cols[3].metric("Task Type", result.get("task_type", "—"))
 
         # Reasoning steps
         st.subheader("Reasoning Steps")

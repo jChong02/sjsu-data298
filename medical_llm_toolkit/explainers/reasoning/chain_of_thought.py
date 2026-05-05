@@ -266,8 +266,10 @@ class ChainOfThoughtExtractor:
         task_type: str,
     ) -> Tuple[str, Optional[float], Optional[Dict]]:
         if task_type == "free":
-            answer = self._extract_letter_from_text(reasoning, patterns=_ANSWER_PATTERNS)
-            return answer or reasoning, None, None
+            # Free response: the reasoning IS the answer. Don't try to pull
+            # an A/B/C/D out of it — the bare-letter fallback pattern would
+            # spuriously match references like "Patient A" or "Type B".
+            return reasoning, None, None
 
         if task_type == "yn":
             allowed_ids = self.wrapper.AB_IDS

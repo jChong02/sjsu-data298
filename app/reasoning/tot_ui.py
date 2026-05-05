@@ -89,14 +89,22 @@ class TreeOfThoughtUI(ReasoningUI):
         return tot.extract(prompt, task_type=task_type)
 
     def render_results(self, result: Dict[str, Any], ground_truth: Optional[str] = None):
-        cols = st.columns(4)
-        cols[0].metric("Answer", result.get("answer") or "—")
-        if result.get("confidence") is not None:
-            cols[1].metric("Confidence", f"{result['confidence']:.4f}")
-        if ground_truth:
-            correct = result.get("answer") == ground_truth
-            cols[2].metric("Ground Truth", ground_truth, delta="✓" if correct else "✗")
-        cols[3].metric("Branches", len(result.get("thoughts") or []))
+        is_free = result.get("task_type") == "free"
+        n_branches = len(result.get("thoughts") or [])
+
+        if is_free:
+            cols = st.columns(2)
+            cols[0].metric("Task Type", "Free Response")
+            cols[1].metric("Branches", n_branches)
+        else:
+            cols = st.columns(4)
+            cols[0].metric("Answer", result.get("answer") or "—")
+            if result.get("confidence") is not None:
+                cols[1].metric("Confidence", f"{result['confidence']:.4f}")
+            if ground_truth:
+                correct = result.get("answer") == ground_truth
+                cols[2].metric("Ground Truth", ground_truth, delta="✓" if correct else "✗")
+            cols[3].metric("Branches", n_branches)
 
         thoughts = result.get("thoughts") or []
         scores = result.get("scores") or []
