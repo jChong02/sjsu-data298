@@ -12,6 +12,48 @@ def _strip_position_suffix(token_key: str) -> str:
     return token_key.rsplit("_", 1)[0]
 
 
+# ---------------------------------------------------------------------------
+# Cached loaders — expensive objects are shared across reruns and sessions
+# ---------------------------------------------------------------------------
+
+@st.cache_resource
+def _load_embedding_vectorizer(model_name: str, device: str):
+    from medical_llm_toolkit.explainers.tokenshap.extensions.value_functions import EmbeddingVectorizer
+    return EmbeddingVectorizer(model_name=model_name, device=device)
+
+
+@st.cache_resource
+def _load_spacy_backend(model_name: str):
+    from medical_llm_toolkit.explainers.tokenshap.extensions.splitters import SpaCyNERBackend
+    return SpaCyNERBackend(model_name)
+
+
+@st.cache_resource
+def _load_hf_ner_backend(model_name: str, device: str):
+    from medical_llm_toolkit.explainers.tokenshap.extensions.splitters import HuggingFaceNERBackend
+    return HuggingFaceNERBackend(model_name, device=device)
+
+
+# ---------------------------------------------------------------------------
+# UI component
+# ---------------------------------------------------------------------------
+
+_VECTORIZER_OPTIONS = [
+    "TF-IDF (default)",
+    "Correctness-aware (binary)",
+    "Correctness-aware (prob)",
+    "Embedding similarity",
+    "Hybrid — correctness + embedding (binary)",
+    "Hybrid — correctness + embedding (prob)",
+]
+
+_SPLITTER_OPTIONS = [
+    "Word (default)",
+    "Semantic — spaCy NER",
+    "Semantic — HuggingFace NER",
+]
+
+
 class TokenShapUI(ExplainerUI):
     name = "tokenshap"
     display_name = "TokenSHAP"
@@ -22,43 +64,126 @@ class TokenShapUI(ExplainerUI):
     supported_tasks = {"yn", "mcq"}
 
     def render_config(self, key_prefix: str) -> Dict[str, Any]:
-        cols = st.columns(3)
+        # --- Row 1: main controls ---
+        cols = st.columns(4)
+
         with cols[0]:
-            vectorizer = st.selectbox(
-                "Value Function",
-                options=["TF-IDF (default)", "Correctness-aware (binary)", "Correctness-aware (prob)"],
-                key=f"{key_prefix}vectorizer",
+            splitter = st.selectbox(
+                "Splitter",
+                options=_SPLITTER_OPTIONS,
+                key=f"{key_prefix}splitter",
                 help=(
-                    "TF-IDF: measures response similarity. "
-                    "Correctness-aware: measures impact on prediction correctness."
+                    "Word: whitespace split (default). "
+                    "Semantic: groups named entities as single atomic tokens "
+                    "so multi-word medical terms are not split across positions."
                 ),
             )
         with cols[1]:
+            vectorizer = st.selectbox(
+                "Value Function",
+                options=_VECTORIZER_OPTIONS,
+                key=f"{key_prefix}vectorizer",
+                help=(
+                    "TF-IDF: lexical response similarity. "
+                    "Embedding: semantic response similarity. "
+                    "Correctness-aware: impact on predicting the right answer. "
+                    "Hybrid: blend of correctness and embedding similarity."
+                ),
+            )
+        with cols[2]:
             sampling_ratio = st.slider(
                 "Sampling Ratio",
-                min_value=0.0,
-                max_value=1.0,
-                value=0.5,
-                step=0.05,
+                min_value=0.0, max_value=1.0, value=0.5, step=0.05,
                 key=f"{key_prefix}sampling_ratio",
                 help="Fraction of non-essential combinations to sample. 0 = essential only.",
             )
-        with cols[2]:
+        with cols[3]:
             max_combinations = st.number_input(
                 "Max Combinations",
-                min_value=10,
-                max_value=5000,
-                value=100,
-                step=10,
+                min_value=10, max_value=5000, value=100, step=10,
                 key=f"{key_prefix}max_combinations",
                 help="Upper limit on total combinations evaluated.",
             )
 
-        return {
-            "vectorizer": vectorizer,
-            "sampling_ratio": sampling_ratio,
-            "max_combinations": max_combinations,
+        params: Dict[str, Any] = {
+            "splitter":        splitter,
+            "vectorizer":      vectorizer,
+            "sampling_ratio":  sampling_ratio,
+            "max_combinations": int(max_combinations),
         }
+
+        # --- Row 2: conditional extension config ---
+        needs_embedding = "Embedding" in vectorizer or "Hybrid" in vectorizer
+        needs_ner       = "Semantic" in splitter
+
+        if needs_embedding or needs_ner:
+            st.markdown("**Extension settings**")
+            ext_cols = st.columns(4)
+            col_idx = 0
+
+            if needs_embedding:
+                with ext_cols[col_idx]:
+                    params["embedding_model"] = st.text_input(
+                        "Embedding model",
+                        value="sentence-transformers/all-MiniLM-L6-v2",
+                        key=f"{key_prefix}embedding_model",
+                        help="Any HuggingFace encoder model ID.",
+                    )
+                col_idx += 1
+                with ext_cols[col_idx]:
+                    params["embedding_device"] = st.selectbox(
+                        "Embedding device",
+                        options=["cpu", "cuda"],
+                        key=f"{key_prefix}embedding_device",
+                    )
+                col_idx += 1
+
+            if "Hybrid" in vectorizer:
+                with ext_cols[col_idx]:
+                    params["alpha"] = st.slider(
+                        "Alpha (correctness weight)",
+                        min_value=0.0, max_value=1.0, value=0.5, step=0.05,
+                        key=f"{key_prefix}alpha",
+                        help="1.0 = pure correctness, 0.0 = pure embedding similarity.",
+                    )
+                col_idx += 1
+
+            if needs_ner:
+                with ext_cols[col_idx]:
+                    if "spaCy" in splitter:
+                        params["ner_model"] = st.text_input(
+                            "spaCy model",
+                            value="en_core_web_sm",
+                            key=f"{key_prefix}ner_model",
+                            help="Must be installed: python -m spacy download <model>",
+                        )
+                    else:
+                        params["ner_model"] = st.text_input(
+                            "HF NER model",
+                            value="dslim/bert-base-NER",
+                            key=f"{key_prefix}ner_model",
+                            help="Any HuggingFace token-classification model ID.",
+                        )
+                col_idx += 1
+                if "HuggingFace" in splitter and col_idx < 4:
+                    with ext_cols[col_idx]:
+                        params["ner_device"] = st.selectbox(
+                            "NER device",
+                            options=["cpu", "cuda"],
+                            key=f"{key_prefix}ner_device",
+                        )
+
+        # Warn if a correctness-based vectorizer is chosen but no ground truth
+        # will be available — the app passes ground_truth at run time, so we
+        # surface the warning here rather than silently falling back.
+        if ("Correctness" in vectorizer or "Hybrid" in vectorizer):
+            st.info(
+                "Correctness-aware and Hybrid value functions require a **ground truth label**. "
+                "Make sure the correct answer is set in the main panel before running.",
+                icon="ℹ️",
+            )
+
+        return params
 
     def run(
         self,
@@ -68,69 +193,109 @@ class TokenShapUI(ExplainerUI):
         ground_truth: Optional[str],
         params: Dict[str, Any],
     ) -> Dict[str, Any]:
-        from medical_llm_toolkit.explainers.tokenshap.token_shap.token_shap import (
-            StringSplitter,
-        )
-        from medical_llm_toolkit.explainers.tokenshap.extensions.qa_tokenshap import (
-            QATokenSHAP,
-        )
-        from medical_llm_toolkit.explainers.tokenshap.token_shap.base import (
-            TfidfTextVectorizer,
-        )
+        from medical_llm_toolkit.explainers.tokenshap.token_shap.token_shap import StringSplitter
+        from medical_llm_toolkit.explainers.tokenshap.extensions.qa_tokenshap import QATokenSHAP
+        from medical_llm_toolkit.explainers.tokenshap.token_shap.base import TfidfTextVectorizer
 
-        # Set wrapper to answer_only mode for TokenSHAP
         prev_mode = wrapper.mode
         wrapper.set_mode("answer_only")
 
         try:
-            splitter = StringSplitter()
+            # --- Splitter ---
+            splitter_choice = params["splitter"]
+            if "spaCy" in splitter_choice:
+                from medical_llm_toolkit.explainers.tokenshap.extensions.splitters import SemanticSplitter
+                ner = _load_spacy_backend(params.get("ner_model", "en_core_web_sm"))
+                splitter = SemanticSplitter(ner)
+            elif "HuggingFace" in splitter_choice:
+                from medical_llm_toolkit.explainers.tokenshap.extensions.splitters import SemanticSplitter
+                ner = _load_hf_ner_backend(
+                    params.get("ner_model", "dslim/bert-base-NER"),
+                    params.get("ner_device", "cpu"),
+                )
+                splitter = SemanticSplitter(ner)
+            else:
+                splitter = StringSplitter()
 
-            # Select vectorizer
+            # --- Vectorizer ---
             vec_choice = params["vectorizer"]
-            if vec_choice.startswith("Correctness-aware") and ground_truth:
-                from medical_llm_toolkit.explainers.tokenshap.extensions.value_functions.correctness_value import (
-                    CorrectnessValueFunction,
+            needs_ground_truth = "Correctness" in vec_choice or "Hybrid" in vec_choice
+
+            if needs_ground_truth and not ground_truth:
+                st.error(
+                    "This value function requires a ground truth label. "
+                    "Please set the correct answer in the main panel and re-run."
+                )
+                return {}
+
+            if vec_choice == "TF-IDF (default)":
+                vectorizer = TfidfTextVectorizer()
+
+            elif "Embedding similarity" in vec_choice:
+                vectorizer = _load_embedding_vectorizer(
+                    params.get("embedding_model", "sentence-transformers/all-MiniLM-L6-v2"),
+                    params.get("embedding_device", "cpu"),
+                )
+
+            elif vec_choice == "Correctness-aware (binary)":
+                from medical_llm_toolkit.explainers.tokenshap.extensions.value_functions import CorrectnessValueFunction
+                vectorizer = CorrectnessValueFunction(correct_label=ground_truth, mode="binary")
+
+            elif vec_choice == "Correctness-aware (prob)":
+                from medical_llm_toolkit.explainers.tokenshap.extensions.value_functions import CorrectnessValueFunction
+                vectorizer = CorrectnessValueFunction(correct_label=ground_truth, mode="prob")
+
+            elif "Hybrid" in vec_choice:
+                from medical_llm_toolkit.explainers.tokenshap.extensions.value_functions import HybridValueFunction
+                emb = _load_embedding_vectorizer(
+                    params.get("embedding_model", "sentence-transformers/all-MiniLM-L6-v2"),
+                    params.get("embedding_device", "cpu"),
                 )
                 mode = "binary" if "binary" in vec_choice else "prob"
-                vectorizer = CorrectnessValueFunction(
-                    correct_label=ground_truth, mode=mode
+                vectorizer = HybridValueFunction(
+                    correct_label=ground_truth,
+                    embedding_vectorizer=emb,
+                    mode=mode,
+                    alpha=params.get("alpha", 0.5),
                 )
+
             else:
                 vectorizer = TfidfTextVectorizer()
 
+            # --- Run ---
             analyzer = QATokenSHAP(
                 model=wrapper,
                 splitter=splitter,
                 vectorizer=vectorizer,
                 debug=False,
             )
-
             results_df = analyzer.analyze(
                 prompt,
                 sampling_ratio=params["sampling_ratio"],
                 max_combinations=params["max_combinations"],
             )
 
-            # Extract shapley values
             shapley_values = analyzer.shapley_values
-
-            # Build token list and score list (strip position suffixes)
             tokens = [_strip_position_suffix(k) for k in shapley_values.keys()]
             scores = list(shapley_values.values())
 
             return {
-                "tokens": tokens,
-                "attributions": np.array(scores),
-                "shapley_values": shapley_values,
-                "results_df": results_df,
-                "prediction": wrapper.last_answer,
-                "target_class": target_class,
+                "tokens":          tokens,
+                "attributions":    np.array(scores),
+                "shapley_values":  shapley_values,
+                "results_df":      results_df,
+                "prediction":      wrapper.last_answer,
+                "target_class":    target_class,
                 "all_option_probs": wrapper.last_option_probs,
             }
+
         finally:
             wrapper.set_mode(prev_mode)
 
     def render_results(self, result: Dict[str, Any]):
+        if not result:
+            return
+
         # Header metrics
         cols = st.columns(3)
         cols[0].metric("Prediction", result.get("prediction", "N/A"))
@@ -197,7 +362,7 @@ class TokenShapUI(ExplainerUI):
             import pandas as pd
             sv = result["shapley_values"]
             df = pd.DataFrame({
-                "Token": [_strip_position_suffix(k) for k in sv.keys()],
+                "Token":         [_strip_position_suffix(k) for k in sv.keys()],
                 "Shapley Value": list(sv.values()),
             })
             df = df.sort_values("Shapley Value", ascending=False).reset_index(drop=True)

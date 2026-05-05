@@ -170,14 +170,14 @@ class QATokenSHAP(TokenSHAP):
     # Payoff helpers
     # ------------------------------------------------------------------
 
-    def _compute_payoff_from_meta(self, meta: Dict[str, Any]) -> float:
+    def _compute_payoff_from_meta(self, meta: Dict[str, Any], response_text: str = None) -> float:
         """Compute a correctness payoff from one combination's captured metadata."""
         pred = meta.get("pred")
         probs = meta.get("probs")
 
         self._debug_print(f"[DEBUG PAYOFF] pred={pred}  probs={probs}  correct={self.vectorizer.correct_label}")
 
-        return self.vectorizer.compute_payoff(pred, probs)
+        return self.vectorizer.compute_payoff(pred, probs, response=response_text)
 
     # ------------------------------------------------------------------
     # DataFrame construction
@@ -211,7 +211,12 @@ class QATokenSHAP(TokenSHAP):
                     "during _calculate_baseline (unperturbed generate call)."
                 )
 
-            baseline_payoff = self._compute_payoff_from_meta(self._baseline_meta)
+            # Give hybrid vectorizers a chance to encode the baseline response
+            # before the payoff loop starts.
+            if hasattr(vec, "set_baseline"):
+                vec.set_baseline(baseline_text)
+
+            baseline_payoff = self._compute_payoff_from_meta(self._baseline_meta, response_text=baseline_text)
             self._debug_print(f"[QATokenSHAP] Baseline payoff: {baseline_payoff}")
 
             sims = []
@@ -222,7 +227,8 @@ class QATokenSHAP(TokenSHAP):
                         f"No captured metadata for combination key {key!r}. "
                         "This is an internal bug in QATokenSHAP."
                     )
-                payoff = self._compute_payoff_from_meta(meta)
+                response_text_combo = responses[key][0]
+                payoff = self._compute_payoff_from_meta(meta, response_text=response_text_combo)
                 sims.append(payoff - baseline_payoff)
 
             df["Similarity"] = sims
