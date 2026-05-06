@@ -1,8 +1,13 @@
 """
 Value function extensions for TokenSHAP.
-Includes placeholders and experimental scoring methods.
 """
 
 from .correctness_value import CorrectnessValueFunction
+from .embedding_value import EmbeddingVectorizer
+from .hybrid_value import HybridValueFunction
 
-__all__ = ["CorrectnessValueFunction"]
+__all__ = [
+    "CorrectnessValueFunction",
+    "EmbeddingVectorizer",
+    "HybridValueFunction",
+]

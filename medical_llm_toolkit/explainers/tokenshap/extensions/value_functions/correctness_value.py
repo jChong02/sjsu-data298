@@ -23,7 +23,7 @@ class CorrectnessValueFunction(TextVectorizer):
         self.correct_label = correct_label
         self.mode = mode
 
-    def compute_payoff(self, pred: str, probs: dict) -> float:
+    def compute_payoff(self, pred: str, probs: dict, response: str = None) -> float:
         """
         Compute the correctness payoff for a single model prediction.
 
