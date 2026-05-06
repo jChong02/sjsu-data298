@@ -14,9 +14,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import streamlit as st
 import numpy as np
 
-# Register all explainers on import
+# Register all explainers and reasoners on import
 import app.explainers  # noqa: F401
+import app.reasoning  # noqa: F401
 from app.registry import get_all
+from app.reasoning_registry import get_all as get_all_reasoners
 from app.visualization import render_token_highlights_html, get_top_k_data, apply_plotly_theme
 
 # ---------------------------------------------------------------------------
@@ -163,11 +165,30 @@ if "generation_result" not in st.session_state:
     st.session_state.generation_result = None
 if "explainer_results" not in st.session_state:
     st.session_state.explainer_results = {}
+if "reasoning_results" not in st.session_state:
+    st.session_state.reasoning_results = {}
+if "app_mode" not in st.session_state:
+    st.session_state.app_mode = "Attribution Methods"
 
 # ---------------------------------------------------------------------------
 # Sidebar — Model Configuration
 # ---------------------------------------------------------------------------
 with st.sidebar:
+    st.header("App Mode")
+    app_mode = st.radio(
+        "Method Category",
+        options=["Attribution Methods", "Reasoning Methods"],
+        key="app_mode",
+        help=(
+            "Attribution methods (LIME, IG, TokenSHAP) explain WHICH input "
+            "tokens drove the answer. Reasoning methods (CoT, ToT) elicit "
+            "the model's step-by-step reasoning before answering."
+        ),
+        label_visibility="collapsed",
+    )
+
+    st.divider()
+
     st.header("Model Configuration")
 
     # HF token
@@ -239,6 +260,7 @@ with st.sidebar:
         st.session_state.model_status = "loading"
         st.session_state.generation_result = None
         st.session_state.explainer_results = {}
+        st.session_state.reasoning_results = {}
 
         with st.spinner(f"Loading {model_id}..."):
             try:
@@ -282,6 +304,7 @@ with st.sidebar:
         st.session_state.model_status = "not_loaded"
         st.session_state.generation_result = None
         st.session_state.explainer_results = {}
+        st.session_state.reasoning_results = {}
         st.rerun()
 
     # Status indicator
@@ -344,13 +367,25 @@ if task_type in ("yn", "mcq"):
     elif ground_truth:
         ground_truth = ground_truth.strip().upper()
 
-# ---- Generate ----
+# ---- Mode dispatch ----
 st.divider()
-generate_clicked = st.button(
-    "Generate",
-    type="primary",
-    disabled=st.session_state.model_status != "ready",
-)
+
+if app_mode == "Attribution Methods":
+    _show_attribution_section = True
+    _show_reasoning_section = False
+else:
+    _show_attribution_section = False
+    _show_reasoning_section = True
+
+# ---- Generate (attribution mode only) ----
+if _show_attribution_section:
+    generate_clicked = st.button(
+        "Generate",
+        type="primary",
+        disabled=st.session_state.model_status != "ready",
+    )
+else:
+    generate_clicked = False
 
 if generate_clicked and st.session_state.wrapper is not None:
     st.session_state.explainer_results = {}
@@ -368,9 +403,9 @@ if generate_clicked and st.session_state.wrapper is not None:
             st.error(f"Generation failed: {e}")
             st.session_state.generation_result = None
 
-# ---- Display generation result ----
+# ---- Display generation result (attribution mode only) ----
 gen_result = st.session_state.generation_result
-if gen_result is not None:
+if _show_attribution_section and gen_result is not None:
     st.header("Model Output")
 
     col_answer, col_conf = st.columns([2, 1])
@@ -558,3 +593,64 @@ if gen_result is not None:
             "XAI explanations are currently supported for Yes/No and "
             "Multiple Choice tasks only."
         )
+
+# ---------------------------------------------------------------------------
+# Reasoning Methods section
+# ---------------------------------------------------------------------------
+if _show_reasoning_section:
+    st.header("Reasoning Methods")
+    st.caption(
+        "Each method runs its own generation pass. The model's predicted answer "
+        "is produced as part of the reasoning, not from a separate Generate step."
+    )
+
+    if st.session_state.model_status != "ready" or st.session_state.wrapper is None:
+        st.warning("Load a model first using the sidebar.")
+    elif not (prompt and prompt.strip()):
+        st.info("Enter or select a question above to run a reasoning method.")
+    else:
+        reasoners = get_all_reasoners()
+        available_reasoners = {
+            name: r for name, r in reasoners.items() if r.is_available(task_type)
+        }
+
+        if not available_reasoners:
+            st.info("No reasoning methods available for this task type.")
+        else:
+            tab_names = [r.display_name for r in available_reasoners.values()]
+            tabs = st.tabs(tab_names)
+
+            for i, (method_name, reasoner) in enumerate(available_reasoners.items()):
+                with tabs[i]:
+                    st.caption(reasoner.description)
+
+                    with st.expander("Configuration", expanded=False):
+                        params = reasoner.render_config(f"{method_name}_")
+
+                    run_clicked = st.button(
+                        f"Run {reasoner.display_name}",
+                        key=f"run_reasoning_{method_name}",
+                        type="primary",
+                    )
+
+                    if run_clicked:
+                        with st.spinner(f"Running {reasoner.display_name}..."):
+                            try:
+                                result = reasoner.run(
+                                    wrapper=st.session_state.wrapper,
+                                    prompt=prompt,
+                                    task_type=task_type,
+                                    ground_truth=ground_truth,
+                                    params=params,
+                                )
+                                st.session_state.reasoning_results[method_name] = result
+                            except Exception as e:
+                                st.error(f"{reasoner.display_name} failed: {e}")
+                                import traceback
+                                st.code(traceback.format_exc())
+
+                    if method_name in st.session_state.reasoning_results:
+                        reasoner.render_results(
+                            st.session_state.reasoning_results[method_name],
+                            ground_truth=ground_truth,
+                        )
