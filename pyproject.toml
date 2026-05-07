@@ -9,8 +9,8 @@ description = "Interpretability and reasoning toolkit for question-answering lan
 readme = "README.md"
 license = {text = "MIT"}
 authors = [
-    {name = "Anne Ha"},
     {name = "Jeff Chong"},
+    {name = "Anne Ha"},
     {name = "Jiyoon Lee"},
     {name = "Matthew Leffler"},
     {name = "Nairui Liu"},

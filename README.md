@@ -297,8 +297,8 @@ The new method automatically appears as a tab in the UI. The Comparison tab pick
 
 **SJSU DATA 298A / 298B - Team 8** (Fall 2025 / Spring 2026)
 
-- Anne Ha
 - Jeff Chong
+- Anne Ha
 - Jiyoon Lee
 - Matthew Leffler
 - Nairui Liu
