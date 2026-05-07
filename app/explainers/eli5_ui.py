@@ -15,7 +15,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 from app.registry import ExplainerUI, register
-from app.visualization import apply_plotly_theme
+from app.visualization import apply_plotly_theme, BAR_COLOR_POS, BAR_COLOR_NEG
 
 
 # Kind labels shown in the radio control.
@@ -220,17 +220,22 @@ class ELI5UI(ExplainerUI):
                     f"beyond the class prior."
                 )
 
-        # ---- Per-prompt class probabilities ----
+        # ---- Per-prompt class probabilities (predicted class highlighted) ----
+        import plotly.graph_objects as go  # noqa: E402 — local to avoid import cost on cold paths
+
+        predicted = result.get("predicted_class")
         if result.get("class_probs"):
             st.markdown("**Surrogate class probabilities for this prompt:**")
-            import plotly.graph_objects as go
-
             probs = result["class_probs"]
+            colors = [
+                BAR_COLOR_POS if k == predicted else "rgba(232,153,35,0.30)"
+                for k in probs.keys()
+            ]
             fig = go.Figure(
                 go.Bar(
                     x=list(probs.keys()),
                     y=list(probs.values()),
-                    marker_color="#e89923",
+                    marker_color=colors,
                     text=[f"{v:.3f}" for v in probs.values()],
                     textposition="auto",
                     textfont=dict(color="#e8e0d4"),
@@ -244,18 +249,88 @@ class ELI5UI(ExplainerUI):
             apply_plotly_theme(fig)
             st.plotly_chart(fig, use_container_width=True)
 
-        # ---- Native eli5 HTML (per-class feature contributions) ----
-        st.markdown("**Per-class feature contributions for this prompt:**")
-        st.caption(
-            "Per-class TF-IDF n-gram contributions from the surrogate. "
-            "`<BIAS>` is the surrogate's intercept and is independent of "
-            "the prompt content."
-        )
-        components.html(result["html"], height=600, scrolling=True)
+        # ---- Per-class feature contributions: tabs with themed bar charts ----
+        per_class = result.get("per_class_features") or {}
+        if per_class:
+            st.markdown("**Per-class feature contributions:**")
+            st.caption(
+                "Each tab shows which n-gram features pushed the surrogate "
+                "toward that class. Orange bars support the class; teal bars "
+                "push against it. **BIAS** is the surrogate's intercept — "
+                "the class's prior contribution before any prompt content. "
+                "**Score** is the linear combination (bias + sum of feature "
+                "contributions) before softmax."
+            )
 
-        # ---- Global feature weights ----
+            labels = result.get("labels", list(per_class.keys()))
+            ordered_labels = (
+                [predicted] + [l for l in labels if l != predicted]
+                if predicted in per_class else list(per_class.keys())
+            )
+            tab_titles = [
+                (f"• {l}" if l == predicted else l) for l in ordered_labels
+            ]
+            class_tabs = st.tabs(tab_titles)
+
+            for label, tab in zip(ordered_labels, class_tabs):
+                info = per_class.get(label)
+                if info is None:
+                    continue
+                with tab:
+                    # Sub-metrics: P(class), score, bias
+                    m_cols = st.columns(3)
+                    if info.get("proba") is not None:
+                        m_cols[0].metric(f"P({label})", f"{info['proba']:.3f}")
+                    if info.get("score") is not None:
+                        m_cols[1].metric("Score", f"{info['score']:+.3f}")
+                    if info.get("bias") is not None:
+                        m_cols[2].metric("BIAS", f"{info['bias']:+.3f}")
+
+                    features = info.get("features") or []
+                    if not features:
+                        st.caption(
+                            "No prompt-content features contributed beyond the "
+                            "BIAS term for this class."
+                        )
+                        continue
+
+                    names = [f[0] for f in features]
+                    weights = [f[1] for f in features]
+                    colors = [
+                        BAR_COLOR_POS if w > 0 else BAR_COLOR_NEG
+                        for w in weights
+                    ]
+                    fig = go.Figure(
+                        go.Bar(
+                            x=weights,
+                            y=names,
+                            orientation="h",
+                            marker_color=colors,
+                            text=[f"{w:+.3f}" for w in weights],
+                            textposition="auto",
+                            textfont=dict(color="#e8e0d4"),
+                        )
+                    )
+                    fig.update_layout(
+                        height=max(280, len(names) * 28),
+                        margin=dict(l=0, r=20, t=10, b=0),
+                        yaxis=dict(autorange="reversed"),
+                        xaxis_title="Contribution to score",
+                    )
+                    apply_plotly_theme(fig)
+                    st.plotly_chart(fig, use_container_width=True)
+
+        # ---- Raw eli5 HTML kept behind an expander for completeness ----
+        if result.get("html"):
+            with st.expander("Raw ELI5 table view (alternative layout)"):
+                st.caption(
+                    "Native eli5 HTML output. Useful if you prefer a tabular "
+                    "view or want to see all classes at once. Light theme."
+                )
+                components.html(result["html"], height=600, scrolling=True)
+
         if result.get("global_html"):
-            with st.expander("Global feature weights (across the whole training corpus)"):
+            with st.expander("Global feature weights across the training corpus (raw view)"):
                 components.html(result["global_html"], height=600, scrolling=True)
 
         # ---- Bundle metadata ----

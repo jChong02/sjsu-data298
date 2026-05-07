@@ -191,10 +191,14 @@ class MedicalELI5:
 
         Returns a dict with:
             kind: the surrogate kind used
-            html: eli5.show_prediction HTML for this prompt
             predicted_class: surrogate's top-class prediction
             class_probs: dict mapping each class label to its probability
             labels: the surrogate's class labels
+            per_class_features: dict mapping class -> {"score", "proba",
+                "bias", "features"} where ``features`` is a list of
+                ``(name, weight, value)`` tuples sorted by absolute weight.
+                The ``<BIAS>`` feature is split out into its own field.
+            html: eli5.show_prediction HTML (kept for the optional raw view)
             heldout_score: held-out score from training
             majority_baseline: implied prior of the dominant class
             delta_above_prior: heldout_score - majority_baseline
@@ -226,16 +230,48 @@ class MedicalELI5:
             class_probs = {}
         predicted_class = str(clf.predict(X)[0])
 
-        # Native eli5 HTML.
+        # Pull a structured per-class breakdown via eli5.explain_prediction
+        # (returns an Explanation object — much friendlier than the HTML).
         target_names = labels if len(labels) > 1 else None
+        per_class_features: Dict[str, Dict[str, Any]] = {}
         html: str
         try:
-            expl = eli5.show_prediction(
+            expl_obj = eli5.explain_prediction(
                 clf, prompt, vec=vec, top=top, target_names=target_names
             )
-            html = getattr(expl, "data", None) or str(expl)
+            for target in expl_obj.targets:
+                tname = str(target.target)
+                bias_weight: Optional[float] = None
+                features: List[tuple] = []
+                # eli5 splits feature_weights into pos/neg lists already
+                fw = target.feature_weights
+                for f in list(fw.pos) + list(fw.neg):
+                    if f.feature == "<BIAS>":
+                        bias_weight = float(f.weight)
+                        continue
+                    features.append((
+                        str(f.feature),
+                        float(f.weight),
+                        float(getattr(f, "value", 0.0) or 0.0),
+                    ))
+                features.sort(key=lambda t: abs(t[1]), reverse=True)
+                per_class_features[tname] = {
+                    "score": (float(target.score)
+                              if target.score is not None else None),
+                    "proba": (float(target.proba)
+                              if target.proba is not None else None),
+                    "bias": bias_weight,
+                    "features": features,
+                }
+
+            # Keep the native HTML around for users who want the raw view.
+            expl_html = eli5.show_prediction(
+                clf, prompt, vec=vec, top=top, target_names=target_names
+            )
+            html = getattr(expl_html, "data", None) or str(expl_html)
         except Exception as exc:  # pragma: no cover — defensive
-            html = f"<em>eli5.show_prediction failed: {exc!s}</em>"
+            per_class_features = {}
+            html = f"<em>eli5.explain_prediction failed: {exc!s}</em>"
 
         score = float(s["heldout_score"])
         baseline = self.majority_baseline(kind)
@@ -244,6 +280,7 @@ class MedicalELI5:
         return {
             "kind": kind,
             "html": html,
+            "per_class_features": per_class_features,
             "predicted_class": predicted_class,
             "class_probs": class_probs,
             "labels": labels,
