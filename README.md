@@ -8,7 +8,7 @@ The XAI and reasoning methods implemented here are **topic-agnostic**. LIME, Int
 
 As an SJSU DATA 298 project, we chose to ground the work in **biomedical question-answering**, a high-stakes domain where interpretability matters. The following pieces of the repository are biomedical *by choice*, not by necessity:
 
-- The bundled dataset (`data/compiled_df.parquet`, drawn from medical QA sources)
+- The bundled dataset (`data/compiled_df.parquet`), built from 5 biomedical QA sources (MedQA, MedMCQA, PubMedQA, MMLU, Huatuo) by the Airflow pipeline in [`airflow/`](airflow/); exploratory analysis behind those preprocessing choices is documented in [`data-prep/`](data-prep/)
 - The four preset models in the sidebar (Apollo-2B, BioMistral-7B, MedGemma-4B, BioMedLM)
 - The pre-trained ELI5 surrogates shipped in `medical_llm_toolkit/eli5_surrogates/`
 - The example prompts in the UI
@@ -66,10 +66,17 @@ sjsu-data298/
 │   └── reasoning/
 │       ├── cot_ui.py
 │       └── tot_ui.py
-├── data/                               # Bundled dataset parquet files
-├── data-prep/                          # Notebooks documenting dataset construction
+├── data/                               # Bundled dataset parquet files (final outputs)
+├── data-prep/                          # Exploratory notebooks for dataset construction
 │   ├── preliminary_dataset_exploration.ipynb
 │   └── preprocessing.ipynb
+├── airflow/                            # Production pipeline that built data/ (not required for the demo)
+│   ├── README.md                       # Setup guide (docker-compose + AWS S3)
+│   ├── docker-compose.yml
+│   ├── requirements.txt                # Airflow-specific deps (separate from pyproject.toml)
+│   ├── dags/dag.py                     # DAG definition
+│   ├── pipeline/preprocessing.py       # Preprocessing logic the DAG calls
+│   └── raw/                            # 5 source datasets (medqa, medmcqa, pubmedqa, mmlu, huatuo)
 ├── eval/
 │   ├── run_evaluation.py               # Unified faithfulness + stability evaluation
 │   └── results/                        # CSV outputs from prior eval runs

@@ -1,0 +1,14 @@
+apache-airflow==2.8.1
+apache-airflow-providers-amazon
+boto3
+pandas
+pyarrow
+requests
+matplotlib
+seaborn
+numpy
+scikit-learn
+transformers
+pyarrow 
+s3fs 
+torch
