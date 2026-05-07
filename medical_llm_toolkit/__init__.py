@@ -10,6 +10,7 @@ from .wrapper import MedicalLLMWrapper, load_medical_llm
 from .explainers.lime import MedicalLIME, visualize_lime_attributions
 from .explainers.integrated_gradients import MedicalIntegratedGradients, visualize_attributions
 from .explainers.tokenshap.extensions import QATokenSHAP, qa_extractor
+from .explainers.eli5 import MedicalELI5
 
 __version__ = "0.1.0"
 
@@ -22,4 +23,5 @@ __all__ = [
     "visualize_attributions",
     "QATokenSHAP",
     "qa_extractor",
+    "MedicalELI5",
 ]

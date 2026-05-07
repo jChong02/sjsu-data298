@@ -6,3 +6,4 @@ To add a new method, create a new file here and import it below.
 from . import lime_ui
 from . import ig_ui
 from . import tokenshap_ui
+from . import eli5_ui

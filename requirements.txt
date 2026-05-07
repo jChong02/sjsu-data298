@@ -12,6 +12,9 @@ shap>=0.42.0
 openai>=1.0.0
 opencv-python>=4.8.0
 
+# ELI5
+eli5>=0.13.0
+
 # App (Streamlit UI)
 streamlit>=1.30.0
 watchdog>=3.0.0

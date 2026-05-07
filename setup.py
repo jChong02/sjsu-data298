@@ -11,6 +11,10 @@ setup(
     long_description=long_description,
     long_description_content_type="text/markdown",
     packages=find_packages(include=["medical_llm_toolkit", "medical_llm_toolkit.*"]),
+    package_data={
+        "medical_llm_toolkit": ["eli5_surrogates/*.pkl"],
+    },
+    include_package_data=True,
     classifiers=[
         "Development Status :: 3 - Alpha",
         "Intended Audience :: Science/Research",
@@ -22,6 +26,7 @@ setup(
     ],
     python_requires=">=3.8",
     install_requires=[
+        # Core toolkit
         "torch>=2.0.0",
         "transformers>=4.30.0",
         "numpy>=1.24.0",
@@ -30,5 +35,13 @@ setup(
         "accelerate>=0.20.0",
         "shap>=0.42.0",
         "scikit-learn>=1.0.0",
+        "eli5>=0.13.0",
+        # Streamlit UI
+        "streamlit>=1.30.0",
+        "plotly>=5.0.0",
+        "watchdog>=3.0.0",
+        # Evaluation + dataset I/O
+        "pandas>=2.0.0",
+        "pyarrow>=12.0.0",
     ],
 )

@@ -1,715 +1,278 @@
-
 """
-Run:
-    python ELI5_adapter.py
+ELI5 explainer for medical LLMs.
 
-Before running, edit the CONFIG section below if needed
+Wraps a pre-trained TF-IDF + Logistic Regression surrogate and uses the
+`eli5` library to produce per-class feature-contribution HTML for any
+prompt. Unlike LIME / IG / TokenSHAP, this is a *global* surrogate: it is
+trained once on a corpus and then applied to any prompt by transforming
+the prompt with the learned TF-IDF vocabulary. Explanations are per-class
+contributions across the surrogate's vocabulary, not per-prompt-token
+attributions.
 
-Requirements (example):
-    pip install -U pandas pyarrow numpy scikit-learn eli5 matplotlib huggingface_hub
+Pre-trained surrogate bundles for the four preset models live in
+``medical_llm_toolkit/eli5_surrogates/``. To train new bundles for a
+custom model see ``notebooks/train_eli5_surrogates.ipynb``.
 
-Also required:
-    medical_llm_wrapper_fixed.py   (defines MedicalLLMWrapper)
-    compiled_df.parquet
+Bundle pickle schema (``schema_version=1``)::
+
+    {
+        "schema_version": 1,
+        "model_id": str,
+        "task_type": "mcq" | "yn",
+        "n_samples_requested": int,
+        "trained_at": iso8601 string,
+        "vectorizer": sklearn TfidfVectorizer,
+        "vocab_size": int,
+        "n_train": int,
+        "n_test": int,
+        "surrogates": {
+            "mimic" | "gold" | "error": {
+                "clf": sklearn LogisticRegression,
+                "labels": list[str],
+                "heldout_score": float,
+            },
+            ...
+        },
+    }
 """
 
-import os, re, time
-from collections import Counter
+from __future__ import annotations
+
+import pickle
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
 import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-import torch
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score, balanced_accuracy_score, classification_report, confusion_matrix
-from sklearn.pipeline import make_pipeline
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.linear_model import LogisticRegression
-import eli5
-from huggingface_hub import login
-from medical_llm_wrapper_fixed import MedicalLLMWrapper
-
-try:
-    from IPython.display import display 
-except Exception: 
-    def display(x):
-        print(x)
 
 
-# CONFIG
-SEED = 42
-rng = np.random.default_rng(SEED)
-DATA_PATH = "/data/compiled_df.parquet"
-HF_TOKEN = os.environ.get('HF_TOKEN')
-MODEL_ID = "BioMistral/BioMistral-7B"
-DEVICE = "cuda"
+SUPPORTED_KINDS = ("mimic", "gold", "error")
+
+KIND_DESCRIPTIONS: Dict[str, str] = {
+    "mimic": "Predicts what the LLM outputs (model-explanation surrogate).",
+    "gold":  "Predicts the true answer (dataset-level diagnostic; LLM-independent).",
+    "error": "Predicts whether the LLM was wrong (failure-mode diagnostic).",
+}
 
 
-# helper functions
-def extract_abcd_from_options(options_text: str):
-    if options_text is None:
-        return None
-    s = str(options_text)
+def model_id_to_filename(model_id: str, task_type: str) -> str:
+    """Filename convention shared by the training notebook and the loader."""
+    safe = model_id.replace("/", "__")
+    return f"{safe}__{task_type}.pkl"
 
-    matches = re.findall(r"(?is)\b([ABCD])\s*[\.\)]\s*(.*?)(?=\n\s*[ABCD]\s*[\.\)]|\Z)", s)
-    if not matches or len(matches) < 4:
-        return None
-    d = {k.upper(): v.strip() for k, v in matches}
-    if all(k in d for k in ["A","B","C","D"]):
-        return d
-    return None
 
-def render_mcq_prompt(question: str, options_text: str):
-    opts = extract_abcd_from_options(options_text)
-    if not opts:
-        return (
-            "You are a careful medical question-answering assistant.\n"
-            "Choose the single best option.\n\n"
-            f"Question: {question}\n"
-            f"{options_text}\n"
-            "Answer: "
+def default_surrogate_dir() -> Path:
+    """Location of bundled pre-trained surrogates inside the package."""
+    return Path(__file__).resolve().parent.parent / "eli5_surrogates"
+
+
+class MedicalELI5:
+    """ELI5 explainer wrapping a pre-trained surrogate bundle.
+
+    Loaders:
+        - ``MedicalELI5.from_bundle_path(path)`` — load a specific .pkl
+        - ``MedicalELI5.from_disk(model_id, task_type, search_dir=None)``
+          — look up a bundle in the surrogates directory; returns ``None``
+          if no bundle exists for that ``(model_id, task_type)``.
+
+    Main entry point:
+        - ``.explain(prompt, kind, top)`` — returns a dict with native
+          eli5 HTML, surrogate predictions, fidelity metrics, and an
+          implied class prior derived from the surrogate's intercept
+          term so callers can show an honest "above prior" delta.
+    """
+
+    def __init__(self, bundle: Dict[str, Any]):
+        self.bundle = bundle
+        self.model_id: str = bundle["model_id"]
+        self.task_type: str = bundle["task_type"]
+        self.vectorizer = bundle["vectorizer"]
+        self.surrogates: Dict[str, Dict[str, Any]] = bundle["surrogates"]
+        self.vocab_size: int = int(bundle.get("vocab_size", -1))
+        self.n_train: int = int(bundle.get("n_train", -1))
+        self.n_test: int = int(bundle.get("n_test", -1))
+        self.trained_at: str = str(bundle.get("trained_at", ""))
+        self.schema_version: int = int(bundle.get("schema_version", 1))
+
+    # ------------------------------------------------------------------
+    # Loading
+    # ------------------------------------------------------------------
+    @classmethod
+    def from_bundle_path(cls, path: Path) -> "MedicalELI5":
+        with open(path, "rb") as f:
+            bundle = pickle.load(f)
+        return cls(bundle)
+
+    @classmethod
+    def from_disk(
+        cls,
+        model_id: str,
+        task_type: str,
+        search_dir: Optional[Path] = None,
+    ) -> Optional["MedicalELI5"]:
+        """Look up a bundle by ``(model_id, task_type)``.
+
+        Returns ``None`` if no matching bundle is found in
+        ``search_dir`` (defaults to the packaged ``eli5_surrogates``
+        directory).
+        """
+        if search_dir is None:
+            search_dir = default_surrogate_dir()
+        path = Path(search_dir) / model_id_to_filename(model_id, task_type)
+        if not path.exists():
+            return None
+        return cls.from_bundle_path(path)
+
+    # ------------------------------------------------------------------
+    # Introspection
+    # ------------------------------------------------------------------
+    def has_kind(self, kind: str) -> bool:
+        return kind in self.surrogates
+
+    def available_kinds(self) -> List[str]:
+        """Return surrogate kinds present in the bundle, in canonical order."""
+        return [k for k in SUPPORTED_KINDS if k in self.surrogates]
+
+    def heldout_score(self, kind: str) -> Optional[float]:
+        s = self.surrogates.get(kind)
+        return None if s is None else float(s["heldout_score"])
+
+    def labels(self, kind: str) -> List[str]:
+        s = self.surrogates.get(kind)
+        return [] if s is None else list(s["labels"])
+
+    def implied_class_prior(self, kind: str) -> Dict[str, float]:
+        """Compute the surrogate's implied class prior from its intercepts.
+
+        - Multiclass: ``softmax(intercept_)`` per class.
+        - Binary: ``sigmoid(intercept_)`` is ``P(class=1)``; the other
+          class's probability is the complement.
+
+        This approximates the majority-class baseline a "predict from
+        intercept only" classifier would achieve, which is the right
+        comparison point for the surrogate's heldout score.
+        """
+        s = self.surrogates.get(kind)
+        if s is None:
+            return {}
+        clf = s["clf"]
+        labels = list(s["labels"])
+        intercepts = np.asarray(getattr(clf, "intercept_", []), dtype=float).ravel()
+        if intercepts.size == 0:
+            return {}
+        # Binary LogReg in sklearn stores a single intercept for class 1.
+        if intercepts.size == 1 and len(labels) == 2:
+            p1 = float(1.0 / (1.0 + np.exp(-intercepts[0])))
+            return {labels[0]: 1.0 - p1, labels[1]: p1}
+        # Multiclass: softmax of per-class intercepts.
+        if intercepts.size == len(labels):
+            shifted = intercepts - intercepts.max()
+            exp = np.exp(shifted)
+            probs = exp / exp.sum()
+            return {label: float(p) for label, p in zip(labels, probs)}
+        return {}
+
+    def majority_baseline(self, kind: str) -> Optional[float]:
+        """Approximate majority-class baseline = ``max(implied_class_prior)``."""
+        prior = self.implied_class_prior(kind)
+        if not prior:
+            return None
+        return max(prior.values())
+
+    # ------------------------------------------------------------------
+    # Explanation
+    # ------------------------------------------------------------------
+    def explain(
+        self,
+        prompt: str,
+        kind: str = "mimic",
+        top: int = 20,
+    ) -> Dict[str, Any]:
+        """Run ELI5 on ``prompt`` using the chosen surrogate.
+
+        Returns a dict with:
+            kind: the surrogate kind used
+            html: eli5.show_prediction HTML for this prompt
+            predicted_class: surrogate's top-class prediction
+            class_probs: dict mapping each class label to its probability
+            labels: the surrogate's class labels
+            heldout_score: held-out score from training
+            majority_baseline: implied prior of the dominant class
+            delta_above_prior: heldout_score - majority_baseline
+            model_id, task_type: copied from the bundle
+        """
+        import eli5  # lazy import — avoids hard dependency at import time
+
+        if kind not in self.surrogates:
+            raise ValueError(
+                f"Surrogate kind '{kind}' is not available for "
+                f"{self.model_id} ({self.task_type}). "
+                f"Available: {self.available_kinds()}"
+            )
+
+        s = self.surrogates[kind]
+        clf = s["clf"]
+        vec = self.vectorizer
+        labels = [str(x) for x in s["labels"]]
+
+        # Surrogate prediction + class probabilities for this prompt.
+        X = vec.transform([prompt])
+        if hasattr(clf, "predict_proba"):
+            probs = clf.predict_proba(X)[0]
+            class_probs = {
+                str(c): float(p)
+                for c, p in zip(getattr(clf, "classes_", labels), probs)
+            }
+        else:
+            class_probs = {}
+        predicted_class = str(clf.predict(X)[0])
+
+        # Native eli5 HTML.
+        target_names = labels if len(labels) > 1 else None
+        html: str
+        try:
+            expl = eli5.show_prediction(
+                clf, prompt, vec=vec, top=top, target_names=target_names
+            )
+            html = getattr(expl, "data", None) or str(expl)
+        except Exception as exc:  # pragma: no cover — defensive
+            html = f"<em>eli5.show_prediction failed: {exc!s}</em>"
+
+        score = float(s["heldout_score"])
+        baseline = self.majority_baseline(kind)
+        delta = (score - baseline) if baseline is not None else None
+
+        return {
+            "kind": kind,
+            "html": html,
+            "predicted_class": predicted_class,
+            "class_probs": class_probs,
+            "labels": labels,
+            "heldout_score": score,
+            "majority_baseline": baseline,
+            "delta_above_prior": delta,
+            "model_id": self.model_id,
+            "task_type": self.task_type,
+        }
+
+    def show_global_weights(self, kind: str = "mimic", top: int = 30) -> str:
+        """Return ``eli5.show_weights`` HTML for the surrogate's global feature importances."""
+        import eli5
+
+        if kind not in self.surrogates:
+            raise ValueError(
+                f"Kind '{kind}' is not available; have {self.available_kinds()}"
+            )
+        s = self.surrogates[kind]
+        labels = [str(x) for x in s["labels"]]
+        target_names = labels if len(labels) > 1 else None
+        expl = eli5.show_weights(
+            s["clf"], vec=self.vectorizer, top=top, target_names=target_names
         )
-    return (
-        "You are a careful medical question-answering assistant.\n"
-        "Choose the single best option.\n\n"
-        f"Question: {question}\n"
-        "Answer Choices:\n"
-        f"A. {opts['A']}\n"
-        f"B. {opts['B']}\n"
-        f"C. {opts['C']}\n"
-        f"D. {opts['D']}\n"
-        "Answer: "
-    )
-
-def render_yn_prompt(question: str):
-    return (
-        "You are a careful medical question-answering assistant.\n"
-        "Answer Yes or No.\n"
-        "Use A for Yes and B for No.\n\n"
-        f"Question: {question}\n"
-        "Answer: "
-    )
-
-def parse_mcq_answer_strict(text: str):
-    if text is None:
-        return None
-    t = str(text).strip()
-
-    m = re.search(r"(?im)^\s*Final:\s*([ABCD])\s*$", t)
-    if m: return m.group(1).upper()
-
-    m = re.search(r"(?im)^\s*Answer:\s*([ABCD])\s*$", t)
-    if m: return m.group(1).upper()
-
-    lines = [ln.strip() for ln in t.splitlines() if ln.strip()]
-    for ln in reversed(lines):
-        if re.fullmatch(r"[ABCD]", ln, flags=re.IGNORECASE):
-            return ln.upper()
-    return None
-
-def parse_yn_answer_strict(text: str):
-    if text is None:
-        return None
-    t = str(text).strip()
-
-    m = re.search(r"(?im)^\s*Final:\s*([AB])\s*$", t)
-    if m: return m.group(1).upper()
-
-    m = re.search(r"(?im)^\s*Answer:\s*([AB])\s*$", t)
-    if m: return m.group(1).upper()
-
-    lines = [ln.strip() for ln in t.splitlines() if ln.strip()]
-    for ln in reversed(lines):
-        if re.fullmatch(r"[AB]", ln, flags=re.IGNORECASE):
-            return ln.upper()
-
-    return None
-
-def normalize_gold_yn(val):
-    g = str(val).strip().lower()
-    if g in {"yes", "y", "true", "t", "1", "a"}:
-        return "A"  # Yes
-    if g in {"no", "n", "false", "f", "0", "b"}:
-        return "B"  # No
-    return None
-
-def reasoning_suffix_mcq():
-    return (
-        "\n\nExplain briefly (1-3 sentences).\n"
-        "Then output the final answer on the last line ONLY as:\n"
-        "Final: A\n"
-        "or Final: B\n"
-        "or Final: C\n"
-        "or Final: D\n"
-        "Do not write anything after the Final line."
-    )
-
-def reasoning_suffix_yn():
-    return (
-        "\n\nExplain briefly (1-3 sentences).\n"
-        "Then output the final answer on the last line ONLY as:\n"
-        "Final: A   (A = Yes)\n"
-        "or Final: B   (B = No)\n"
-        "Do not write anything after the Final line."
-    )
-
-def eval_mcq_answer_only(df_mcq: pd.DataFrame, n=1000, seed=7):
-    df_s = df_mcq.sample(n=min(n, len(df_mcq)), random_state=seed).reset_index(drop=True)
-    golds, preds = [], []
-
-    for r in df_s.to_dict("records"):
-        gold = str(r["answer_label"]).strip().upper()
-        if gold not in {"A","B","C","D"}:
-            continue
-
-        prompt = render_mcq_prompt(r["question"], r["options"])
-        llm.set_task("mcq"); llm.set_mode("answer_only")
-        out = llm.generate(prompt)
-        pred = parse_mcq_answer_strict(out)
-
-        if pred not in {"A","B","C","D"}:
-            continue
-
-        golds.append(gold); preds.append(pred)
-
-    acc = accuracy_score(golds, preds) if golds else 0.0
-    print(f"MCQ answer_only accuracy: {acc:.4f} (n={len(golds)}/{len(df_s)})")
-    print(classification_report(golds, preds, labels=["A","B","C","D"]))
-    return acc
-
-def eval_yn_answer_only(df_yn: pd.DataFrame, n=600, seed=7):
-    df_s = df_yn.sample(n=min(n, len(df_yn)), random_state=seed).reset_index(drop=True)
-    golds, preds = [], []
-
-    for r in df_s.to_dict("records"):
-        gold = normalize_gold_yn(r["answer_label"])
-        if gold not in {"A","B"}:
-            continue
-
-        prompt = render_yn_prompt(r["question"])
-        llm.set_task("yn"); llm.set_mode("answer_only")
-        out = llm.generate(prompt)
-        pred = parse_yn_answer_strict(out)
-
-        if pred not in {"A","B"}:
-            continue
-
-        golds.append(gold); preds.append(pred)
-
-    acc = accuracy_score(golds, preds) if golds else 0.0
-    print(f"Y/N answer_only accuracy: {acc:.4f} (n={len(golds)}/{len(df_s)})")
-    print(classification_report(golds, preds, labels=["A","B"]))
-
-    return acc
-
-def clean_text(t: str):
-    t = str(t or "")
-    t = re.sub(r"\s+", " ", t).strip()
-    return t
-
-def mcq_surrogate_text(question: str, options_text: str):
-    opts = extract_abcd_from_options(options_text)
-    if not opts:
-        return clean_text(question + " " + str(options_text))
-    return clean_text(
-        f"{question} "
-        f"A {opts['A']} "
-        f"B {opts['B']} "
-        f"C {opts['C']} "
-        f"D {opts['D']}"
-    )
-
-def yn_surrogate_text(question: str):
-    return clean_text(question + " (A=Yes, B=No)")
-
-def train_surrogate_return_parts(X_texts, y, title="", top=30, seed=7):
-    if len(set(y)) < 2:
-        print(f"[{title}] Not enough class variety.")
-        return None, None, None
-
-    Xtr, Xte, ytr, yte = train_test_split(
-        X_texts, y, test_size=0.2, random_state=seed, stratify=y
-    )
-
-    tf = TfidfVectorizer(ngram_range=(1,2), min_df=2, max_df=0.95)
-    clf = LogisticRegression(max_iter=4000)
-
-    Xtr_t = tf.fit_transform(Xtr)
-    clf.fit(Xtr_t, ytr)
-
-    score = clf.score(tf.transform(Xte), yte)
-    print(f"[{title}] heldout score: {score:.3f} (n_test={len(yte)})")
-
-    pipe = make_pipeline(tf, clf)
-    feat_names = tf.get_feature_names_out()
-    try:
-        display(eli5.show_weights(clf, top=top, feature_names=feat_names))
-    except Exception as e:
-        # fallback
-        print("[eli5.show_weights] error:", e)
-
-    return pipe, tf, clf
-
-def eli5_explain_case_parts(vectorizer, classifier, text, top=20, display_html=True):
-    X = vectorizer.transform([text])
-    x_dense = X.toarray()[0]
-
-    feature_names = vectorizer.get_feature_names_out()
-
-    try:
-        disp = eli5.show_prediction(classifier, x_dense, feature_names=feature_names, top=top)
-        if display_html:
-            display(disp)
-        else:
-            return disp
-    except Exception as e:
-        print("[eli5.show_prediction] error:", e)
-        print("Falling back to top weighted features from classifier.coef_")
-        coefs = classifier.coef_
-        if coefs.ndim == 1 or coefs.shape[0] == 1:
-            coef = coefs.ravel()
-        else:
-            coef = coefs.max(axis=0)
-        top_idx_pos = np.argsort(-coef)[:top]
-        top_idx_neg = np.argsort(coef)[:top]
-        names = feature_names
-        print("\nTop positive features:")
-        for i in top_idx_pos:
-            print(f"{coef[i]:+.3f}\t{names[i]}")
-        print("\nTop negative features:")
-        for i in top_idx_neg:
-            print(f"{coef[i]:+.3f}\t{names[i]}")
-
-def collect_mcq_for_surrogates(df_mcq, n=1500, seed=7):
-    df_s = df_mcq.sample(n=min(n, len(df_mcq)), random_state=seed).reset_index(drop=True)
-    rows = []
-    for r in df_s.to_dict("records"):
-        gold = str(r["answer_label"]).strip().upper()
-        if gold not in {"A","B","C","D"}:
-            continue
-
-        prompt = render_mcq_prompt(r["question"], r["options"])
-        llm.set_task("mcq"); llm.set_mode("answer_only")
-        out = llm.generate(prompt)
-        pred = parse_mcq_answer_strict(out)
-        if pred not in {"A","B","C","D"}:
-            continue
-
-        rows.append({
-            "text": mcq_surrogate_text(r["question"], r["options"]),
-            "gold": gold,
-            "pred": pred,
-            "wrong": int(pred != gold),
-            "question": r["question"],
-            "options": r["options"],
-        })
-    return pd.DataFrame(rows)
-
-def collect_yn_for_surrogates(df_yn, n=1500, seed=7):
-    df_s = df_yn.sample(n=min(n, len(df_yn)), random_state=seed).reset_index(drop=True)
-    rows = []
-    for r in df_s.to_dict("records"):
-        gold = normalize_gold_yn(r["answer_label"])
-        if gold not in {"A","B"}:
-            continue
-
-        prompt = render_yn_prompt(r["question"])
-        llm.set_task("yn"); llm.set_mode("answer_only")
-        out = llm.generate(prompt)
-        pred = parse_yn_answer_strict(out)
-        if pred not in {"A","B"}:
-            continue
-
-        rows.append({
-            "text": yn_surrogate_text(r["question"]),
-            "gold": gold,
-            "pred": pred,
-            "wrong": int(pred != gold),
-            "question": r["question"],
-        })
-    return pd.DataFrame(rows)
-
-def explain_case(bundle, text, top=20):
-    if bundle.get("mimic"):
-        print("\n[ELI5] mimic_llm (why the model predicts what it predicts):")
-        display(eli5.show_prediction(bundle["mimic"], text, top=top))
-    if bundle.get("gold"):
-        print("\n[ELI5] predict_gold (features associated with correct labels):")
-        display(eli5.show_prediction(bundle["gold"], text, top=top))
-    if bundle.get("error"):
-        print("\n[ELI5] predict_error (features associated with failures):")
-        display(eli5.show_prediction(bundle["error"], text, top=top))
-
-def get_tf_clf_from_bundle(bundle, key):
-    if bundle is None:
-        return None, None
-
-    part = bundle.get(key, None) if isinstance(bundle, dict) else bundle
-
-    # If part is a dict with tf/clf
-    if isinstance(part, dict):
-        tf = part.get("tf", None)
-        clf = part.get("clf", None)
-        if tf is not None and clf is not None:
-            return tf, clf
-
-        pipe = part.get("pipe", None)
-        if pipe is not None and hasattr(pipe, "named_steps"):
-            tf = pipe.named_steps.get("tfidfvectorizer") or pipe.named_steps.get("tfidfvectorizer".replace("_",""))
-            clf = pipe.named_steps.get("logisticregression") or pipe.named_steps.get("logisticregression".replace("_",""))
-            return tf, clf
-
-    # If part is a sklearn Pipeline directly
-    if hasattr(part, "named_steps"):
-        pipe = part
-        tf = pipe.named_steps.get("tfidfvectorizer") or pipe.named_steps.get("tfidfvectorizer".replace("_",""))
-        if tf is None:
-            first = list(pipe.named_steps.items())[0][1]
-            tf = first if hasattr(first, "vocabulary_") or hasattr(first, "get_feature_names_out") else None
-        clf = pipe.named_steps.get("logisticregression") or pipe.named_steps.get("logisticregression".replace("_",""))
-        if clf is None:
-            last = list(pipe.named_steps.items())[-1][1]
-            clf = last if hasattr(last, "coef_") else None
-        return tf, clf
-
-    return None, None
-
-def show_wrong_cases_with_eli5(bundle, wrong_cases_df, which="gold", top=20):
-    tf, clf = get_tf_clf_from_bundle(bundle, which)
-    if tf is None or clf is None:
-        print(f"[ERROR] Could not extract tf/clf for '{which}' from bundle. Inspect bundle keys:", list(bundle.keys()) if bundle else None)
-        return
-
-    for _, r in wrong_cases_df.iterrows():
-        print("\n============================")
-        print(f"{which.upper()} GOLD: {r.get('gold')} PRED: {r.get('pred')}")
-        print("Q:", r.get("question"))
-        text = r.get("text") or r.get("question")
-        try:
-            # eli5_explain_case_parts expects
-            eli5_explain_case_parts(tf, clf, text, top=top, display_html=True)
-        except Exception as e:
-            print("[eli5_explain_case_parts] error:", e)
-            # fallback
-            try:
-                X = tf.transform([text])
-                x_dense = X.toarray()[0]
-                feature_names = tf.get_feature_names_out()
-                if hasattr(clf, "coef_"):
-                    coefs = clf.coef_
-                    if coefs.ndim == 1 or coefs.shape[0] == 1:
-                        coef = coefs.ravel()
-                        contrib = coef * x_dense
-                        top_idx = np.argsort(-contrib)[:top]
-                        print("\nTop contributing features (positive):")
-                        for i in top_idx:
-                            if x_dense[i] != 0:
-                                print(f"{contrib[i]:+.3f}\t{feature_names[i]}")
-                        neg_idx = np.argsort(contrib)[:top]
-                        print("\nTop contributing features (negative):")
-                        for i in neg_idx:
-                            if x_dense[i] != 0:
-                                print(f"{contrib[i]:+.3f}\t{feature_names[i]}")
-                    else:
-                        contribs = (coefs * x_dense).max(axis=0)
-                        top_idx = np.argsort(-contribs)[:top]
-                        print("\nTop features by max-class contribution:")
-                        for i in top_idx:
-                            print(f"{contribs[i]:+.3f}\t{feature_names[i]}")
-                else:
-                    print("Classifier has no coef_, cannot compute contributions.")
-            except Exception as e2:
-                print("Fallback failed:", e2)
-
-def debug_inspect_bundle(bundle):
-    print("BUNDLE KEYS:", list(bundle.keys()) if isinstance(bundle, dict) else "bundle not dict")
-    for k in (bundle.keys() if isinstance(bundle, dict) else []):
-        val = bundle[k]
-        print(f"\n--- key: {k} ---")
-        print("type:", type(val))
-        # small repr
-        rep = repr(val)
-        print("repr:", rep[:400] + ("..." if len(rep) > 400 else ""))
-        # show attributes that might help
-        attrs = []
-        for a in ("named_steps","steps","get_params","tf","clf","pipe"):
-            if hasattr(val, a):
-                attrs.append(a)
-        if attrs:
-            print("has attrs:", attrs)
-        else:
-            print("no obvious attrs")
-
-def extract_tf_clf_from_obj(obj):
-    # None
-    if obj is None:
-        return None, None
-
-    if isinstance(obj, dict):
-        tf = obj.get("tf") or obj.get("vectorizer") or obj.get("tfidf") or obj.get("tfidfvectorizer")
-        clf = obj.get("clf") or obj.get("classifier") or obj.get("model") or obj.get("logisticregression")
-        if tf is not None and clf is not None:
-            return tf, clf
-        pipe = obj.get("pipe")
-        if pipe is not None:
-            obj = pipe  # fall through
-
-    if hasattr(obj, "named_steps"):
-        ns = obj.named_steps
-        tf = None; clf = None
-        for name in ("tfidfvectorizer","tfidf","vectorizer","tfidf_vectorizer","tfidfvectoriser"):
-            if name in ns:
-                tf = ns[name]
-                break
-        for name in ("logisticregression","classifier","clf","logreg","logistic"):
-            if name in ns:
-                clf = ns[name]
-                break
-
-        if tf is None:
-            try:
-                first = list(ns.items())[0][1]
-                if hasattr(first, "get_feature_names_out") or hasattr(first, "vocabulary_"):
-                    tf = first
-            except Exception:
-                pass
-        if clf is None:
-            try:
-                last = list(ns.items())[-1][1]
-                if hasattr(last, "coef_") or hasattr(last, "decision_function"):
-                    clf = last
-            except Exception:
-                pass
-        if tf is not None and clf is not None:
-            return tf, clf
-
-    if hasattr(obj, "steps"):
-        try:
-            steps = obj.steps
-            if len(steps) >= 2:
-                first = steps[0][1]
-                last = steps[-1][1]
-                tf = first if (hasattr(first,"get_feature_names_out") or hasattr(first,"vocabulary_")) else None
-                clf = last if (hasattr(last,"coef_") or hasattr(last,"decision_function")) else None
-                if tf is not None and clf is not None:
-                    return tf, clf
-        except Exception:
-            pass
-
-    if isinstance(obj, (list, tuple)):
-        if len(obj) >= 2:
-            a, b = obj[0], obj[1]
-            if hasattr(a, "get_feature_names_out") and (hasattr(b, "coef_") or hasattr(b, "decision_function")):
-                return a, b
-            if len(obj) >= 3:
-                a2, b2, c2 = obj[0], obj[1], obj[2]
-                if hasattr(b2, "get_feature_names_out") and (hasattr(c2, "coef_") or hasattr(c2, "decision_function")):
-                    return b2, c2
-    if hasattr(obj, "get_feature_names_out") and hasattr(obj, "transform"):
-        return obj, None
-    if hasattr(obj, "coef_") or hasattr(obj, "decision_function"):
-        return None, obj
-
-    return None, None
-
-def explain_with_fallback(tf, clf, text, top=20):
-    try:
-        if tf is None or clf is None:
-            raise ValueError("tf or clf is None")
-        eli5_explain_case_parts(tf, clf, text, top=top, display_html=True)
-        return
-    except Exception as e:
-        print("[fallback explain] eli5_explain_case_parts failed:", e)
-        try:
-            X = tf.transform([text])
-            x_dense = X.toarray()[0]
-            feature_names = tf.get_feature_names_out()
-            if hasattr(clf, "coef_"):
-                coefs = clf.coef_
-                if coefs.ndim == 1 or coefs.shape[0] == 1:
-                    coef = coefs.ravel()
-                    contrib = coef * x_dense
-                    top_idx_pos = np.argsort(-contrib)[:top]
-                    top_idx_neg = np.argsort(contrib)[:top]
-                    print("\nTop positive contributions:")
-                    for i in top_idx_pos:
-                        if x_dense[i] != 0:
-                            print(f"{contrib[i]:+.3f}\t{feature_names[i]}")
-                    print("\nTop negative contributions:")
-                    for i in top_idx_neg:
-                        if x_dense[i] != 0:
-                            print(f"{contrib[i]:+.3f}\t{feature_names[i]}")
-                else:
-                    # multiclass fallback
-                    contribs = (coefs * x_dense).max(axis=0)
-                    top_idx = np.argsort(-contribs)[:top]
-                    print("\nTop features by max-class contribution:")
-                    for i in top_idx:
-                        print(f"{contribs[i]:+.3f}\t{feature_names[i]}")
-            else:
-                print("Classifier has no coef_; cannot compute contributions.")
-        except Exception as e2:
-            print("Fallback failed:", e2)
-
-
-# MAIN
-def main():
-    if HF_TOKEN:
-        login(token=HF_TOKEN)
-    else:
-        login()
-
-    df = pd.read_parquet(DATA_PATH)
-
-    print("Rows:", len(df))
-
-    print("Columns:", df.columns.tolist())
-
-    qt = df["question_type"].astype(str).str.strip().str.lower()
-
-    qt = qt.replace({"yn":"y/n", "yes/no":"y/n", "y\n":"y/n"})
-
-    df["question_type_norm"] = qt
-
-    print("\nquestion_type counts:")
-
-    print(df["question_type_norm"].value_counts(dropna=False))
-
-    assert "question" in df.columns
-
-    assert "answer_label" in df.columns
-
-    mcq = df[df["question_type_norm"].isin(["mcq","multiple choice","multiple-choice","mcq "])].copy()
-
-    yn  = df[df["question_type_norm"].isin(["y/n","yes/no","yn"])].copy()
-
-    if len(mcq)==0 and "options" in df.columns:
-        mcq = df[df["options"].notna()].copy()
-
-    if len(yn)==0:
-        yn = df[df["answer_label"].astype(str).str.lower().isin(["yes","no"])].copy()
-
-    print("MCQ rows:", len(mcq))
-
-    print("YN  rows:", len(yn))
-
-    if len(mcq):
-        mcq["answer_label"] = mcq["answer_label"].astype(str).str.strip().str.upper()
-        mcq = mcq[mcq["answer_label"].isin(["A","B","C","D"])].copy()
-
-    if len(yn):
-        yn["answer_label"] = yn["answer_label"].astype(str).str.strip().str.lower()
-        yn = yn[yn["answer_label"].isin(["yes","no"])].copy()
-
-    print("MCQ label dist:", Counter(mcq["answer_label"]) if len(mcq) else {})
-
-    print("YN  label dist:", Counter(yn["answer_label"]) if len(yn) else {})
-
-    ex = mcq.iloc[0]
-
-    print(render_mcq_prompt(ex["question"], ex["options"])[:600])
-
-    llm = MedicalLLMWrapper(
-        model_name=MODEL_ID,
-        device=DEVICE,
-        token=HF_TOKEN,
-        torch_dtype=None,
-    )
-
-    llm.set_mode("answer_only")
-
-    llm.get_model_info()
-
-    mcq_ans_acc = eval_mcq_answer_only(mcq, n=1000)
-
-    yn_ans_acc  = eval_yn_answer_only(yn, n=600) if len(yn) else None
-
-    mcq_bundle = None
-
-    if len(mcq):
-        mcq_sur = collect_mcq_for_surrogates(mcq, n=1500)
-        print("MCQ surrogate rows:", len(mcq_sur))
-
-        mcq_bundle = {
-            "mimic": train_surrogate_return_parts(mcq_sur["text"], mcq_sur["pred"], title="MCQ mimic_llm", top=30),
-            "gold":  train_surrogate_return_parts(mcq_sur["text"], mcq_sur["gold"], title="MCQ predict_gold", top=30),
-            "error": train_surrogate_return_parts(mcq_sur["text"], mcq_sur["wrong"], title="MCQ predict_error", top=30),
-        }
-
-    yn_bundle = None
-
-    if len(yn):
-        yn_sur = collect_yn_for_surrogates(yn, n=1500)
-        print("Y/N surrogate rows:", len(yn_sur))
-
-        yn_bundle = {
-            "mimic": train_surrogate_return_parts(yn_sur["text"], yn_sur["pred"], title="Y/N mimic_llm", top=30),
-            "gold":  train_surrogate_return_parts(yn_sur["text"], yn_sur["gold"], title="Y/N predict_gold", top=30),
-            "error": train_surrogate_return_parts(yn_sur["text"], yn_sur["wrong"], title="Y/N predict_error", top=30),
-        }
-
-    print("Inspecting mcq_bundle contents:")
-
-    debug_inspect_bundle(mcq_bundle)
-
-    try:
-        wrong_df = mcq_sur[mcq_sur["wrong"] == 1].head(5)
-    except Exception:
-        try:
-            wrong_df = wrong_cases
-        except Exception:
-            wrong_df = None
-
-    if wrong_df is None or len(wrong_df) == 0:
-        print("No wrong cases found to explain.")
-    else:
-        for which in ("mimic","gold","error"):
-            print(f"\n\n=== Explanations for '{which}' ===")
-            obj = mcq_bundle.get(which) if isinstance(mcq_bundle, dict) else None
-            tf, clf = extract_tf_clf_from_obj(obj)
-            if tf is None or clf is None:
-                print(f"[WARN] could not extract tf/clf automatically for '{which}'. Attempting additional heuristics...")
-                # try if mcq_bundle[which] is a Pipeline and pull first/last step
-                val = mcq_bundle.get(which)
-                try:
-                    if hasattr(val, "named_steps"):
-                        steps = val.named_steps
-                        print("named_steps keys:", list(steps.keys()))
-                    if hasattr(val, "steps"):
-                        print("steps keys:", [s[0] for s in val.steps])
-                except Exception:
-                    pass
-                # attempt to see if bundle contains tf/clf separately at top-level (unlikely)
-                tf_alt = getattr(mcq_bundle, "tf", None) or mcq_bundle.get("tf") if isinstance(mcq_bundle, dict) else None
-                clf_alt = getattr(mcq_bundle, "clf", None) or mcq_bundle.get("clf") if isinstance(mcq_bundle, dict) else None
-                if tf_alt is not None and clf_alt is not None:
-                    tf, clf = tf_alt, clf_alt
-
-            if tf is None or clf is None:
-                print(f"[ERROR] still no tf/clf for '{which}'. Repr of mcq_bundle['{which}'] shown above. Falling back to best-effort per-example contributions using any available classifier in bundle.")
-                # try to find any classifier in the whole bundle dict
-                found_tf, found_clf = None, None
-                for k in (mcq_bundle.keys() if isinstance(mcq_bundle, dict) else []):
-                    t_tmp, c_tmp = extract_tf_clf_from_obj(mcq_bundle[k])
-                    if c_tmp is not None and found_clf is None:
-                        found_tf, found_clf = t_tmp, c_tmp
-                if found_clf is not None:
-                    print(f"Using classifier found under key (first match).")
-                    tf, clf = found_tf, found_clf
-                else:
-                    print("No classifier found anywhere in bundle. Can't compute contributions.")
-                    tf, clf = None, None
-
-            # Explain each wrong example with the extracted tf/clf
-            for _, r in wrong_df.iterrows():
-                print("\n-----------------------------")
-                print("Q:", r.get("question"))
-                text = r.get("text") or r.get("question")
-                if tf is None or clf is None:
-                    print("No tf/clf available — skipping eli5, printing raw text snippet:")
-                    print(text[:400])
-                else:
-                    explain_with_fallback(tf, clf, text, top=20)
-
-
-if __name__ == "__main__":
-    main()
+        return getattr(expl, "data", None) or str(expl)
+
+    def __repr__(self) -> str:  # pragma: no cover — convenience
+        kinds = ",".join(self.available_kinds())
+        return (
+            f"MedicalELI5(model='{self.model_id}', task='{self.task_type}', "
+            f"kinds=[{kinds}], vocab={self.vocab_size})"
+        )

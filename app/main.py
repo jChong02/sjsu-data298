@@ -1,5 +1,5 @@
 """
-Medical LLM XAI Toolkit — Streamlit App
+LLM XAI Toolkit — Streamlit App
 
 Run with:
     streamlit run app/main.py
@@ -25,7 +25,7 @@ from app.visualization import render_token_highlights_html, get_top_k_data, appl
 # Page config
 # ---------------------------------------------------------------------------
 st.set_page_config(
-    page_title="Medical LLM XAI Toolkit",
+    page_title="LLM XAI Toolkit",
     layout="wide",
 )
 
@@ -324,8 +324,8 @@ with st.sidebar:
 # ---------------------------------------------------------------------------
 # Main area
 # ---------------------------------------------------------------------------
-st.title("Medical LLM XAI Toolkit")
-st.caption("Unified explainability for medical question-answering models")
+st.title("LLM XAI Toolkit")
+st.caption("Unified explainability for question-answering language models")
 
 # ---- Question Input ----
 st.header("Question Input")
@@ -437,162 +437,172 @@ if _show_attribution_section and gen_result is not None:
             st.plotly_chart(fig, use_container_width=True)
 
     # ---- Explanations ----
-    if task_type in ("yn", "mcq"):
+    # Show the explanations section for any task type — the registry filter
+    # below decides which methods actually appear. Methods that don't support
+    # the current task (LIME / IG / ELI5 for free; etc.) are hidden via their
+    # ExplainerUI.supported_tasks declaration.
+    explainers = get_all()
+    available = {
+        name: exp
+        for name, exp in explainers.items()
+        if exp.is_available(task_type)
+    }
+
+    if not available:
+        st.info(
+            f"No XAI explainer methods available for task type '{task_type}'."
+        )
+    else:
         st.header("Explanations")
 
-        explainers = get_all()
-        available = {
-            name: exp
-            for name, exp in explainers.items()
-            if exp.is_available(task_type)
-        }
+        # Determine target class for explainers
+        target_class = gen_result.get("answer")
+        if target_class and target_class not in ["A", "B", "C", "D"]:
+            target_class = None
 
-        if not available:
-            st.info("No explainer methods available for this task type.")
-        else:
-            # Determine target class for explainers
-            target_class = gen_result.get("answer")
-            if target_class and target_class not in ["A", "B", "C", "D"]:
-                target_class = None
+        tab_names = [exp.display_name for exp in available.values()]
+        tab_names.append("Comparison")
+        tabs = st.tabs(tab_names)
 
-            tab_names = [exp.display_name for exp in available.values()]
-            tab_names.append("Comparison")
-            tabs = st.tabs(tab_names)
+        for i, (method_name, explainer) in enumerate(available.items()):
+            with tabs[i]:
+                st.caption(explainer.description)
 
-            for i, (method_name, explainer) in enumerate(available.items()):
-                with tabs[i]:
-                    st.caption(explainer.description)
+                # Config
+                with st.expander("Configuration", expanded=False):
+                    params = explainer.render_config(f"{method_name}_")
 
-                    # Config
-                    with st.expander("Configuration", expanded=False):
-                        params = explainer.render_config(f"{method_name}_")
+                # Run button
+                run_clicked = st.button(
+                    f"Run {explainer.display_name}",
+                    key=f"run_{method_name}",
+                    type="primary",
+                )
 
-                    # Run button
-                    run_clicked = st.button(
-                        f"Run {explainer.display_name}",
-                        key=f"run_{method_name}",
-                        type="primary",
-                    )
-
-                    if run_clicked:
-                        with st.spinner(f"Running {explainer.display_name}..."):
-                            try:
-                                result = explainer.run(
-                                    wrapper=st.session_state.wrapper,
-                                    prompt=prompt,
-                                    target_class=target_class,
-                                    ground_truth=ground_truth,
-                                    params=params,
-                                )
-                                st.session_state.explainer_results[method_name] = result
-                            except Exception as e:
-                                st.error(f"{explainer.display_name} failed: {e}")
-                                import traceback
-                                st.code(traceback.format_exc())
-
-                    # Display results if available
-                    if method_name in st.session_state.explainer_results:
-                        explainer.render_results(
-                            st.session_state.explainer_results[method_name]
-                        )
-
-            # ---- Comparison tab ----
-            with tabs[-1]:
-                completed = st.session_state.explainer_results
-                if len(completed) < 2:
-                    st.info(
-                        "Run at least 2 explainer methods to see a comparison. "
-                        f"Currently completed: {len(completed)}"
-                    )
-                else:
-                    st.subheader("Cross-Method Comparison")
-
-                    # Shared legend (once, not per method)
-                    from app.visualization import _POS_COLOR, _NEG_COLOR, _NEUTRAL_BG
-                    pos_rgb = f"rgb({_POS_COLOR[0]},{_POS_COLOR[1]},{_POS_COLOR[2]})"
-                    neg_rgb = f"rgb({_NEG_COLOR[0]},{_NEG_COLOR[1]},{_NEG_COLOR[2]})"
-                    neu_rgb = f"rgb({_NEUTRAL_BG[0]},{_NEUTRAL_BG[1]},{_NEUTRAL_BG[2]})"
-                    st.markdown(
-                        f'<div style="font-size:12px;color:#999;display:flex;gap:16px;align-items:center;margin-bottom:16px;">'
-                        f'<span style="background:{pos_rgb};padding:2px 10px;border-radius:3px;">&nbsp;</span> Supports'
-                        f'<span style="background:{neg_rgb};padding:2px 10px;border-radius:3px;">&nbsp;</span> Against'
-                        f'<span style="background:{neu_rgb};padding:2px 10px;border-radius:3px;color:#aaa;">&nbsp;</span> Neutral'
-                        f'</div>',
-                        unsafe_allow_html=True,
-                    )
-
-                    # Side-by-side highlights (no per-column legend)
-                    cols = st.columns(len(completed))
-                    for col, (method_name, result) in zip(cols, completed.items()):
-                        with col:
-                            exp = available.get(method_name)
-                            st.markdown(f"**{exp.display_name if exp else method_name}**")
-                            tokens = result.get("words", result.get("tokens", []))
-                            scores = result.get(
-                                "word_attributions", result.get("attributions", [])
+                if run_clicked:
+                    with st.spinner(f"Running {explainer.display_name}..."):
+                        try:
+                            result = explainer.run(
+                                wrapper=st.session_state.wrapper,
+                                prompt=prompt,
+                                target_class=target_class,
+                                ground_truth=ground_truth,
+                                params=params,
                             )
-                            html = render_token_highlights_html(tokens, scores, show_legend=False)
-                            st.markdown(html, unsafe_allow_html=True)
+                            st.session_state.explainer_results[method_name] = result
+                        except Exception as e:
+                            st.error(f"{explainer.display_name} failed: {e}")
+                            import traceback
+                            st.code(traceback.format_exc())
 
-                    # Rank agreement analysis
-                    st.subheader("Top Token Rank Agreement")
-                    k = st.slider(
-                        "Top-K tokens to compare",
-                        min_value=3,
-                        max_value=20,
-                        value=10,
-                        key="comparison_k",
+                # Display results if available
+                if method_name in st.session_state.explainer_results:
+                    explainer.render_results(
+                        st.session_state.explainer_results[method_name]
                     )
 
-                    all_top_k = {}
-                    for method_name, result in completed.items():
+        # ---- Comparison tab ----
+        with tabs[-1]:
+            completed = st.session_state.explainer_results
+            # ELI5 is excluded from cross-method comparison: it produces
+            # global per-class n-gram contributions that don't align with
+            # the per-token attributions from LIME / IG / TokenSHAP.
+            comparable = {k: v for k, v in completed.items() if k != "eli5"}
+            if "eli5" in completed:
+                st.caption(
+                    "ELI5 is excluded from this comparison: it produces "
+                    "global per-class n-gram contributions that don't "
+                    "align with the per-token attributions of LIME / IG "
+                    "/ TokenSHAP. See the ELI5 tab for its native view."
+                )
+            if len(comparable) < 2:
+                st.info(
+                    "Run at least 2 token-aligned explainer methods to see "
+                    f"a comparison. Currently completed: {len(comparable)}"
+                )
+            else:
+                st.subheader("Cross-Method Comparison")
+
+                # Shared legend (once, not per method)
+                from app.visualization import _POS_COLOR, _NEG_COLOR, _NEUTRAL_BG
+                pos_rgb = f"rgb({_POS_COLOR[0]},{_POS_COLOR[1]},{_POS_COLOR[2]})"
+                neg_rgb = f"rgb({_NEG_COLOR[0]},{_NEG_COLOR[1]},{_NEG_COLOR[2]})"
+                neu_rgb = f"rgb({_NEUTRAL_BG[0]},{_NEUTRAL_BG[1]},{_NEUTRAL_BG[2]})"
+                st.markdown(
+                    f'<div style="font-size:12px;color:#999;display:flex;gap:16px;align-items:center;margin-bottom:16px;">'
+                    f'<span style="background:{pos_rgb};padding:2px 10px;border-radius:3px;">&nbsp;</span> Supports'
+                    f'<span style="background:{neg_rgb};padding:2px 10px;border-radius:3px;">&nbsp;</span> Against'
+                    f'<span style="background:{neu_rgb};padding:2px 10px;border-radius:3px;color:#aaa;">&nbsp;</span> Neutral'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+
+                # Side-by-side highlights (no per-column legend)
+                cols = st.columns(len(comparable))
+                for col, (method_name, result) in zip(cols, comparable.items()):
+                    with col:
+                        exp = available.get(method_name)
+                        st.markdown(f"**{exp.display_name if exp else method_name}**")
                         tokens = result.get("words", result.get("tokens", []))
-                        scores = np.array(
-                            result.get(
-                                "word_attributions",
-                                result.get("attributions", []),
-                            )
+                        scores = result.get(
+                            "word_attributions", result.get("attributions", [])
                         )
-                        top_indices = np.argsort(np.abs(scores))[::-1][:k]
-                        top_tokens = set()
-                        for idx in top_indices:
-                            t = tokens[idx] if idx < len(tokens) else f"[{idx}]"
-                            top_tokens.add(t.replace("▁", " ").replace("Ġ", " ").strip())
-                        all_top_k[method_name] = top_tokens
+                        html = render_token_highlights_html(tokens, scores, show_legend=False)
+                        st.markdown(html, unsafe_allow_html=True)
 
-                    method_names = list(all_top_k.keys())
-                    for i in range(len(method_names)):
-                        for j in range(i + 1, len(method_names)):
-                            m1, m2 = method_names[i], method_names[j]
-                            e1 = available.get(m1)
-                            e2 = available.get(m2)
-                            n1 = e1.display_name if e1 else m1
-                            n2 = e2.display_name if e2 else m2
-                            overlap = all_top_k[m1] & all_top_k[m2]
-                            pct = len(overlap) / k * 100
-                            st.write(
-                                f"**{n1}** vs **{n2}**: "
-                                f"{len(overlap)}/{k} tokens overlap ({pct:.0f}%)"
-                            )
-                            if overlap:
-                                st.caption(f"Shared: {', '.join(sorted(overlap))}")
+                # Rank agreement analysis
+                st.subheader("Top Token Rank Agreement")
+                k = st.slider(
+                    "Top-K tokens to compare",
+                    min_value=3,
+                    max_value=20,
+                    value=10,
+                    key="comparison_k",
+                )
 
-                    # Consensus tokens (appear in all methods)
-                    if len(all_top_k) >= 2:
-                        consensus = set.intersection(*all_top_k.values())
-                        if consensus:
-                            st.success(
-                                f"**Consensus tokens** (top-{k} in all methods): "
-                                f"{', '.join(sorted(consensus))}"
-                            )
-                        else:
-                            st.info(f"No tokens appear in the top-{k} of all methods.")
+                all_top_k = {}
+                for method_name, result in comparable.items():
+                    tokens = result.get("words", result.get("tokens", []))
+                    scores = np.array(
+                        result.get(
+                            "word_attributions",
+                            result.get("attributions", []),
+                        )
+                    )
+                    top_indices = np.argsort(np.abs(scores))[::-1][:k]
+                    top_tokens = set()
+                    for idx in top_indices:
+                        t = tokens[idx] if idx < len(tokens) else f"[{idx}]"
+                        top_tokens.add(t.replace("▁", " ").replace("Ġ", " ").strip())
+                    all_top_k[method_name] = top_tokens
 
-    elif task_type == "free":
-        st.info(
-            "XAI explanations are currently supported for Yes/No and "
-            "Multiple Choice tasks only."
-        )
+                method_names = list(all_top_k.keys())
+                for i in range(len(method_names)):
+                    for j in range(i + 1, len(method_names)):
+                        m1, m2 = method_names[i], method_names[j]
+                        e1 = available.get(m1)
+                        e2 = available.get(m2)
+                        n1 = e1.display_name if e1 else m1
+                        n2 = e2.display_name if e2 else m2
+                        overlap = all_top_k[m1] & all_top_k[m2]
+                        pct = len(overlap) / k * 100
+                        st.write(
+                            f"**{n1}** vs **{n2}**: "
+                            f"{len(overlap)}/{k} tokens overlap ({pct:.0f}%)"
+                        )
+                        if overlap:
+                            st.caption(f"Shared: {', '.join(sorted(overlap))}")
+
+                # Consensus tokens (appear in all methods)
+                if len(all_top_k) >= 2:
+                    consensus = set.intersection(*all_top_k.values())
+                    if consensus:
+                        st.success(
+                            f"**Consensus tokens** (top-{k} in all methods): "
+                            f"{', '.join(sorted(consensus))}"
+                        )
+                    else:
+                        st.info(f"No tokens appear in the top-{k} of all methods.")
 
 # ---------------------------------------------------------------------------
 # Reasoning Methods section

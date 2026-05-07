@@ -38,13 +38,20 @@ def _load_hf_ner_backend(model_name: str, device: str):
 # UI component
 # ---------------------------------------------------------------------------
 
-_VECTORIZER_OPTIONS = [
+# Vectorizer options. Correctness-based and Hybrid options require a
+# ground-truth A/B/C/D label and are hidden when the task is free response.
+_VECTORIZER_OPTIONS_LABELED = [
     "TF-IDF (default)",
     "Correctness-aware (binary)",
     "Correctness-aware (prob)",
     "Embedding similarity",
-    "Hybrid — correctness + embedding (binary)",
-    "Hybrid — correctness + embedding (prob)",
+    "Hybrid: correctness + embedding (binary)",
+    "Hybrid: correctness + embedding (prob)",
+]
+
+_VECTORIZER_OPTIONS_FREE = [
+    "TF-IDF (default)",
+    "Embedding similarity",
 ]
 
 _SPLITTER_OPTIONS = [
@@ -54,6 +61,14 @@ _SPLITTER_OPTIONS = [
 ]
 
 
+def _current_task_type() -> str:
+    """Return the task type of the currently-loaded wrapper, or '' if none."""
+    wrapper = st.session_state.get("wrapper")
+    if wrapper is None:
+        return ""
+    return getattr(wrapper, "task_type", "") or ""
+
+
 class TokenShapUI(ExplainerUI):
     name = "tokenshap"
     display_name = "TokenSHAP"
@@ -61,9 +76,27 @@ class TokenShapUI(ExplainerUI):
         "Computes Shapley values for each token by evaluating the model "
         "on random subsets of the input, measuring each token's fair contribution."
     )
-    supported_tasks = {"yn", "mcq"}
+    supported_tasks = {"yn", "mcq", "free"}
 
     def render_config(self, key_prefix: str) -> Dict[str, Any]:
+        is_free = _current_task_type() == "free"
+
+        # Free task gets a narrower vectorizer list (correctness-based options
+        # need a ground-truth letter label) and a lower default Max Combinations
+        # because free generation produces ~200 tokens per LLM call vs 1 token
+        # under constrained yn/mcq decoding — each combination is much slower.
+        vec_options = _VECTORIZER_OPTIONS_FREE if is_free else _VECTORIZER_OPTIONS_LABELED
+        default_max_comb = 30 if is_free else 100
+
+        if is_free:
+            st.caption(
+                "Free-response mode uses plain TokenSHAP without the QA-aware "
+                "perturbation. Correctness/Hybrid value functions are hidden "
+                "because they require an A/B/C/D ground-truth label. Each LLM "
+                "call generates a full free-text response, so keep "
+                "**Max Combinations** low (≈30) — expect several minutes."
+            )
+
         # --- Row 1: main controls ---
         cols = st.columns(4)
 
@@ -75,13 +108,13 @@ class TokenShapUI(ExplainerUI):
                 help=(
                     "Word: whitespace split (default). "
                     "Semantic: groups named entities as single atomic tokens "
-                    "so multi-word medical terms are not split across positions."
+                    "so multi-word entities are not split across positions."
                 ),
             )
         with cols[1]:
             vectorizer = st.selectbox(
                 "Value Function",
-                options=_VECTORIZER_OPTIONS,
+                options=vec_options,
                 key=f"{key_prefix}vectorizer",
                 help=(
                     "TF-IDF: lexical response similarity. "
@@ -100,7 +133,7 @@ class TokenShapUI(ExplainerUI):
         with cols[3]:
             max_combinations = st.number_input(
                 "Max Combinations",
-                min_value=10, max_value=5000, value=100, step=10,
+                min_value=10, max_value=5000, value=default_max_comb, step=10,
                 key=f"{key_prefix}max_combinations",
                 help="Upper limit on total combinations evaluated.",
             )
@@ -179,8 +212,7 @@ class TokenShapUI(ExplainerUI):
         if ("Correctness" in vectorizer or "Hybrid" in vectorizer):
             st.info(
                 "Correctness-aware and Hybrid value functions require a **ground truth label**. "
-                "Make sure the correct answer is set in the main panel before running.",
-                icon="ℹ️",
+                "Make sure the correct answer is set in the main panel before running."
             )
 
         return params
@@ -193,12 +225,23 @@ class TokenShapUI(ExplainerUI):
         ground_truth: Optional[str],
         params: Dict[str, Any],
     ) -> Dict[str, Any]:
-        from medical_llm_toolkit.explainers.tokenshap.token_shap.token_shap import StringSplitter
+        from medical_llm_toolkit.explainers.tokenshap.token_shap.token_shap import (
+            StringSplitter, TokenSHAP,
+        )
         from medical_llm_toolkit.explainers.tokenshap.extensions.qa_tokenshap import QATokenSHAP
         from medical_llm_toolkit.explainers.tokenshap.token_shap.base import TfidfTextVectorizer
 
+        is_free = wrapper.task_type == "free"
+
+        # Constrained yn/mcq tasks switch the wrapper into answer_only so each
+        # generate call returns a deterministic single-letter prediction. For
+        # free task the wrapper has no constrained answer space, so we keep
+        # whatever mode the user has set; greedy decoding in answer_rationale
+        # mode produces the same response across calls (no sampling), which
+        # is what TokenSHAP's value function needs.
         prev_mode = wrapper.mode
-        wrapper.set_mode("answer_only")
+        if not is_free:
+            wrapper.set_mode("answer_only")
 
         try:
             # --- Splitter ---
@@ -263,12 +306,24 @@ class TokenShapUI(ExplainerUI):
                 vectorizer = TfidfTextVectorizer()
 
             # --- Run ---
-            analyzer = QATokenSHAP(
-                model=wrapper,
-                splitter=splitter,
-                vectorizer=vectorizer,
-                debug=False,
-            )
+            # QATokenSHAP keeps the answer-choices block static during
+            # perturbation, which is the right thing for yn/mcq prompts. Free
+            # prompts have no answer-choices block, so we use plain TokenSHAP
+            # and let it perturb the entire prompt.
+            if is_free:
+                analyzer = TokenSHAP(
+                    model=wrapper,
+                    splitter=splitter,
+                    vectorizer=vectorizer,
+                    debug=False,
+                )
+            else:
+                analyzer = QATokenSHAP(
+                    model=wrapper,
+                    splitter=splitter,
+                    vectorizer=vectorizer,
+                    debug=False,
+                )
             results_df = analyzer.analyze(
                 prompt,
                 sampling_ratio=params["sampling_ratio"],
@@ -287,23 +342,40 @@ class TokenShapUI(ExplainerUI):
                 "prediction":      wrapper.last_answer,
                 "target_class":    target_class,
                 "all_option_probs": wrapper.last_option_probs,
+                "task_type":       wrapper.task_type,
             }
 
         finally:
-            wrapper.set_mode(prev_mode)
+            if not is_free:
+                wrapper.set_mode(prev_mode)
 
     def render_results(self, result: Dict[str, Any]):
         if not result:
             return
 
-        # Header metrics
-        cols = st.columns(3)
-        cols[0].metric("Prediction", result.get("prediction", "N/A"))
-        cols[1].metric("Target Class", result.get("target_class", "N/A"))
-        if result.get("all_option_probs"):
-            target = result.get("target_class")
-            prob = result["all_option_probs"].get(target, 0)
-            cols[2].metric("P(target)", f"{prob:.4f}")
+        prediction = result.get("prediction", "")
+        is_free = result.get("task_type") == "free"
+
+        # Header metrics. yn/mcq predictions are a single letter so we show
+        # them as a normal metric. Free predictions are full text — render
+        # them as a code block above the metrics so the layout doesn't break.
+        if is_free:
+            st.markdown("**Generated response (baseline for Shapley comparison):**")
+            display_text = str(prediction).strip() or "(empty response)"
+            if len(display_text) > 600:
+                st.code(display_text[:600] + "\n... [truncated]")
+                with st.expander("Full response"):
+                    st.code(display_text)
+            else:
+                st.code(display_text)
+        else:
+            cols = st.columns(3)
+            cols[0].metric("Prediction", prediction or "N/A")
+            cols[1].metric("Target Class", result.get("target_class", "N/A"))
+            if result.get("all_option_probs"):
+                target = result.get("target_class")
+                prob = result["all_option_probs"].get(target, 0)
+                cols[2].metric("P(target)", f"{prob:.4f}")
 
         # Token highlights
         st.markdown("**Token-level Shapley values:**")
