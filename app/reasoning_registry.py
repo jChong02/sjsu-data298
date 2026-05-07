@@ -1,5 +1,5 @@
 """
-Reasoning UI registry — plugin system for reasoning-elicitation methods
+Reasoning UI registry - plugin system for reasoning-elicitation methods
 (Chain-of-Thought, Tree-of-Thought).
 
 Parallel to app/registry.py (which handles attribution-based XAI methods).
@@ -26,10 +26,10 @@ class ReasoningUI(ABC):
     Base class for reasoning-method UI components.
 
     Each reasoner must define:
-        name            — unique identifier (e.g., "cot")
-        display_name    — shown in UI tabs (e.g., "Chain-of-Thought")
-        description     — one-line summary for tooltips
-        supported_tasks — set of task types this method supports
+        name            - unique identifier (e.g., "cot")
+        display_name    - shown in UI tabs (e.g., "Chain-of-Thought")
+        description     - one-line summary for tooltips
+        supported_tasks - set of task types this method supports
 
     Result dicts produced by run() are method-specific and consumed only by
     the same reasoner's render_results(). Common keys include 'answer',

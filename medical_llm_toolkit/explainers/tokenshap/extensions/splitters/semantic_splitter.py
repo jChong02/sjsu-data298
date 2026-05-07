@@ -15,7 +15,7 @@ class SemanticSplitter(Splitter):
     entity as one indivisible token; non-entity words are split by whitespace.
 
     The NERBackend is fully user-specified, so this splitter is not tied to any
-    domain — swap in a general English model, a biomedical model, or any other
+    domain - swap in a general English model, a biomedical model, or any other
     HuggingFace token-classification model.
 
     Args:

@@ -5,7 +5,7 @@ Loads a pre-trained surrogate bundle from
 LLM and renders the native eli5 per-class feature-contribution HTML.
 
 ELI5 is a *global* surrogate, not a per-prompt method, so it does not
-participate in the cross-method Comparison tab — the main app filters
+participate in the cross-method Comparison tab - the main app filters
 it out and shows a note explaining why.
 """
 
@@ -20,18 +20,18 @@ from app.visualization import apply_plotly_theme, BAR_COLOR_POS, BAR_COLOR_NEG
 
 # Kind labels shown in the radio control.
 _KIND_LABELS = {
-    "mimic": "Mimic — explains the LLM",
-    "gold":  "Gold — dataset patterns (LLM-independent)",
-    "error": "Error — failure-mode features",
+    "mimic": "Mimic - explains the LLM",
+    "gold":  "Gold - dataset patterns (LLM-independent)",
+    "error": "Error - failure-mode features",
 }
 
 # Help text shown next to the kind selector.
 _KIND_HELP = (
-    "**Mimic** trains the surrogate to predict what *this LLM* outputs — "
+    "**Mimic** trains the surrogate to predict what *this LLM* outputs - "
     "this is the actual model explanation.\n\n"
-    "**Gold** trains the surrogate to predict the true answer — a dataset-level "
+    "**Gold** trains the surrogate to predict the true answer - a dataset-level "
     "diagnostic, independent of the LLM.\n\n"
-    "**Error** trains the surrogate to predict whether the LLM was wrong — "
+    "**Error** trains the surrogate to predict whether the LLM was wrong - "
     "useful for spotting failure-correlated features."
 )
 
@@ -42,7 +42,7 @@ class ELI5UI(ExplainerUI):
     description = (
         "Trains a TF-IDF + Logistic Regression surrogate on a QA corpus and "
         "uses ELI5 to highlight per-class feature contributions. Global "
-        "surrogate — explains the model's overall behavior, not this specific "
+        "surrogate - explains the model's overall behavior, not this specific "
         "prompt's per-token attributions."
     )
     supported_tasks = {"yn", "mcq"}
@@ -121,7 +121,7 @@ class ELI5UI(ExplainerUI):
         if missing:
             st.caption(
                 f"Skipped surrogate(s) for this model: **{', '.join(missing)}** "
-                "— typically because the LLM produced only one class label "
+                "- typically because the LLM produced only one class label "
                 "across all training rows (collapse), so the surrogate had "
                 "no variety to learn from."
             )
@@ -221,7 +221,7 @@ class ELI5UI(ExplainerUI):
                 )
 
         # ---- Per-prompt class probabilities (predicted class highlighted) ----
-        import plotly.graph_objects as go  # noqa: E402 — local to avoid import cost on cold paths
+        import plotly.graph_objects as go  # noqa: E402 - local to avoid import cost on cold paths
 
         predicted = result.get("predicted_class")
         if result.get("class_probs"):
@@ -256,7 +256,7 @@ class ELI5UI(ExplainerUI):
             st.caption(
                 "Each tab shows which n-gram features pushed the surrogate "
                 "toward that class. Orange bars support the class; teal bars "
-                "push against it. **BIAS** is the surrogate's intercept — "
+                "push against it. **BIAS** is the surrogate's intercept - "
                 "the class's prior contribution before any prompt content. "
                 "**Score** is the linear combination (bias + sum of feature "
                 "contributions) before softmax."

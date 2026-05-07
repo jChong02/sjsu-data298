@@ -1,0 +1,79 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "medical-llm-toolkit"
+version = "0.1.0"
+description = "Interpretability and reasoning toolkit for question-answering language models"
+readme = "README.md"
+license = {text = "MIT"}
+authors = [
+    {name = "Anne Ha"},
+    {name = "Jeff Chong"},
+    {name = "Jiyoon Lee"},
+    {name = "Matthew Leffler"},
+    {name = "Nairui Liu"},
+]
+requires-python = ">=3.8"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "License :: OSI Approved :: MIT License",
+]
+dependencies = [
+    # Core toolkit
+    "torch>=2.0.0",
+    "torchvision>=0.15.0",
+    "transformers>=4.50.0",
+    "numpy>=1.24.0",
+    "pandas>=2.0.0",
+    "scikit-learn>=1.0.0",
+    "tqdm>=4.65.0",
+    "matplotlib>=3.7.0",
+    "accelerate>=0.20.0",
+    "shap>=0.42.0",
+    "Pillow>=9.0.0",
+    "requests>=2.28.0",
+    "opencv-python>=4.8.0",
+    "openai>=1.0.0",
+    "pyarrow>=12.0.0",
+    "eli5>=0.13.0",
+    # Streamlit UI
+    "streamlit>=1.30.0",
+    "plotly>=5.0.0",
+    "watchdog>=3.0.0",
+]
+
+[project.optional-dependencies]
+# Semantic NER splitter for TokenSHAP - only needed if the user picks the
+# "Semantic - spaCy NER" option in the UI. After installing, also run:
+#   python -m spacy download en_core_web_sm
+spacy = ["spacy>=3.4.0"]
+# Sentence-Transformers backend for upstream TokenSHAP paths. Not required by
+# the toolkit's own EmbeddingVectorizer (which uses transformers.AutoModel).
+sentence-transformers = ["sentence-transformers>=2.2.0"]
+# Convenience: install all optional extras at once.
+all = [
+    "spacy>=3.4.0",
+    "sentence-transformers>=2.2.0",
+]
+
+[project.scripts]
+medxai = "medical_llm_toolkit.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/jChong02/sjsu-data298"
+Repository = "https://github.com/jChong02/sjsu-data298"
+
+[tool.setuptools.packages.find]
+include = ["medical_llm_toolkit*"]
+
+[tool.setuptools.package-data]
+medical_llm_toolkit = ["eli5_surrogates/*.pkl"]

@@ -16,7 +16,7 @@ Usage:
     wrapper.set_task("mcq")
     lime = MedicalLIME(wrapper)
 
-    # Main entry point — auto-selects predicted class as target
+    # Main entry point - auto-selects predicted class as target
     result = lime.analyze(prompt)
 
     # Or specify the class to explain
@@ -27,7 +27,7 @@ Usage:
     print(result['all_option_probs'])     # {'A': 0.1, 'B': 0.7, 'C': 0.1, 'D': 0.1}
     print(result['r_squared'])            # local model fit quality (0–1)
     print(result['top_words'][:5])        # [(word, score), ...] by |attribution|
-    print(result['word_attributions'])    # numpy array — store, plot, compare
+    print(result['word_attributions'])    # numpy array - store, plot, compare
 """
 
 from typing import Dict, List, Optional, Tuple
@@ -54,21 +54,21 @@ class MedicalLIME:
         results = lime.analyze_batch(prompts)          # multiple prompts
 
     Result dict keys:
-        words               List[str]          — word segments
-        word_attributions   np.ndarray         — per-word signed scores
-        tokens              List[str]          — tokenizer subword tokens
-        token_attributions  np.ndarray         — per-token signed scores
-        attributions        np.ndarray         — alias for token_attributions
-        prediction          str                — model's top predicted class
-        target_class        str                — class being explained
-        target_probability  float              — P(target_class) on original
-        all_option_probs    Dict[str, float]   — P(A/B/C/D) on original
-        r_squared           float              — local linear model fit (0–1)
-        intercept           float              — linear model intercept
-        top_words           List[Tuple]        — (word, score) by |score| desc
-        top_positive_words  List[Tuple]        — (word, score) supporting target
-        top_negative_words  List[Tuple]        — (word, score) against target
-        metadata            Dict               — run configuration
+        words               List[str]          - word segments
+        word_attributions   np.ndarray         - per-word signed scores
+        tokens              List[str]          - tokenizer subword tokens
+        token_attributions  np.ndarray         - per-token signed scores
+        attributions        np.ndarray         - alias for token_attributions
+        prediction          str                - model's top predicted class
+        target_class        str                - class being explained
+        target_probability  float              - P(target_class) on original
+        all_option_probs    Dict[str, float]   - P(A/B/C/D) on original
+        r_squared           float              - local linear model fit (0–1)
+        intercept           float              - linear model intercept
+        top_words           List[Tuple]        - (word, score) by |score| desc
+        top_positive_words  List[Tuple]        - (word, score) supporting target
+        top_negative_words  List[Tuple]        - (word, score) against target
+        metadata            Dict               - run configuration
     """
 
     def __init__(
@@ -112,7 +112,7 @@ class MedicalLIME:
 
         The probability for each option is computed by extracting the logit for
         that token at the final position and applying softmax over the option
-        subset — consistent with MedicalLLMWrapper.generate_with_confidence().
+        subset - consistent with MedicalLLMWrapper.generate_with_confidence().
 
         Args:
             text: Prompt text to evaluate
@@ -229,7 +229,7 @@ class MedicalLIME:
 
         Args:
             prompt: Input prompt including answer options and 'Answer:' cue.
-            target_class: Class to explain — 'A', 'B', 'C', or 'D'.
+            target_class: Class to explain - 'A', 'B', 'C', or 'D'.
 
         Returns:
             Rich result dictionary (see class docstring for all keys).
@@ -361,7 +361,7 @@ class MedicalLIME:
 
         Automatically selects the model's predicted class as the target if
         target_class is not specified. Returns the same rich result dict as
-        attribute() — all values are plain Python / NumPy types so they can
+        attribute() - all values are plain Python / NumPy types so they can
         be stored, serialised, or fed into further computation.
 
         Args:
@@ -384,7 +384,7 @@ class MedicalLIME:
             print(f"R² = {result['r_squared']:.3f}")
             print(f"All probs: {result['all_option_probs']}")
         """
-        # Auto-set task type if still on the default 'free' — mirrors _validate()
+        # Auto-set task type if still on the default 'free' - mirrors _validate()
         if self.wrapper.task_type not in ['yn', 'mcq']:
             print(
                 f"[MedicalLIME] Warning: wrapper task type is "

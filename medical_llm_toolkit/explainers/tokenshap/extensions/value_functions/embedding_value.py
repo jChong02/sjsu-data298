@@ -13,7 +13,7 @@ class EmbeddingVectorizer(TextVectorizer):
     value function sensitive to synonym relationships and semantic paraphrases
     that bag-of-words approaches miss (e.g. "MI" ≈ "myocardial infarction").
 
-    Plugs into the standard TokenSHAP similarity path — no changes to QATokenSHAP
+    Plugs into the standard TokenSHAP similarity path - no changes to QATokenSHAP
     needed unless combined with CorrectnessValueFunction via HybridValueFunction.
 
     Args:

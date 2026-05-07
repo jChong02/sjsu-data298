@@ -59,7 +59,7 @@ EVAL_DEFAULTS = {
 
 
 # ---------------------------------------------------------------------------
-# Record builders — normalize each method's output to a common format:
+# Record builders - normalize each method's output to a common format:
 #   {tokens, phi_vector, correct_label, static_suffix, question_text, ...}
 # ---------------------------------------------------------------------------
 
@@ -338,7 +338,7 @@ def overlap_at_k(set_a, set_b, k):
 
 
 # ---------------------------------------------------------------------------
-# XAI method runners — produce a standardized record from a prompt
+# XAI method runners - produce a standardized record from a prompt
 # ---------------------------------------------------------------------------
 
 def run_lime(wrapper, prompt, correct_label, row_id, params):

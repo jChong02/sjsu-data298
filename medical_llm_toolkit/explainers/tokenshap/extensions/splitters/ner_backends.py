@@ -11,7 +11,7 @@ class NERBackend(ABC):
     multi-word entities into single atomic tokens before Shapley analysis.
 
     All concrete implementations must return character offsets into the
-    *original* input string — not token indices from any internal tokenizer.
+    *original* input string - not token indices from any internal tokenizer.
     """
 
     @abstractmethod
@@ -80,9 +80,9 @@ class HuggingFaceNERBackend(NERBackend):
                       - "pruas/BENT-PubMedBERT-NER-disease"  (biomedical diseases)
         device: "cpu", "cuda", "cuda:0", etc.
         aggregation_strategy: How subword tokens are merged.
-                    "simple"  — majority-vote merge (default, recommended)
-                    "first"   — use the first subword's label
-                    "average" — average subword scores
+                    "simple"  - majority-vote merge (default, recommended)
+                    "first"   - use the first subword's label
+                    "average" - average subword scores
     """
 
     def __init__(

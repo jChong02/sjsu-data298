@@ -69,13 +69,13 @@ class MedicalELI5:
     """ELI5 explainer wrapping a pre-trained surrogate bundle.
 
     Loaders:
-        - ``MedicalELI5.from_bundle_path(path)`` — load a specific .pkl
+        - ``MedicalELI5.from_bundle_path(path)`` - load a specific .pkl
         - ``MedicalELI5.from_disk(model_id, task_type, search_dir=None)``
-          — look up a bundle in the surrogates directory; returns ``None``
+          - look up a bundle in the surrogates directory; returns ``None``
           if no bundle exists for that ``(model_id, task_type)``.
 
     Main entry point:
-        - ``.explain(prompt, kind, top)`` — returns a dict with native
+        - ``.explain(prompt, kind, top)`` - returns a dict with native
           eli5 HTML, surrogate predictions, fidelity metrics, and an
           implied class prior derived from the surrogate's intercept
           term so callers can show an honest "above prior" delta.
@@ -204,7 +204,7 @@ class MedicalELI5:
             delta_above_prior: heldout_score - majority_baseline
             model_id, task_type: copied from the bundle
         """
-        import eli5  # lazy import — avoids hard dependency at import time
+        import eli5  # lazy import - avoids hard dependency at import time
 
         if kind not in self.surrogates:
             raise ValueError(
@@ -231,7 +231,7 @@ class MedicalELI5:
         predicted_class = str(clf.predict(X)[0])
 
         # Pull a structured per-class breakdown via eli5.explain_prediction
-        # (returns an Explanation object — much friendlier than the HTML).
+        # (returns an Explanation object - much friendlier than the HTML).
         target_names = labels if len(labels) > 1 else None
         per_class_features: Dict[str, Dict[str, Any]] = {}
         html: str
@@ -269,7 +269,7 @@ class MedicalELI5:
                 clf, prompt, vec=vec, top=top, target_names=target_names
             )
             html = getattr(expl_html, "data", None) or str(expl_html)
-        except Exception as exc:  # pragma: no cover — defensive
+        except Exception as exc:  # pragma: no cover - defensive
             per_class_features = {}
             html = f"<em>eli5.explain_prediction failed: {exc!s}</em>"
 
@@ -307,7 +307,7 @@ class MedicalELI5:
         )
         return getattr(expl, "data", None) or str(expl)
 
-    def __repr__(self) -> str:  # pragma: no cover — convenience
+    def __repr__(self) -> str:  # pragma: no cover - convenience
         kinds = ",".join(self.available_kinds())
         return (
             f"MedicalELI5(model='{self.model_id}', task='{self.task_type}', "

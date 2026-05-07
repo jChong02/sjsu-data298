@@ -7,7 +7,7 @@ import numpy as np
 from typing import List, Optional, Tuple
 
 # ---------------------------------------------------------------------------
-# Color palette — teal/orange, colorblind-friendly, less "alarming" than red
+# Color palette - teal/orange, colorblind-friendly, less "alarming" than red
 # ---------------------------------------------------------------------------
 # Supports answer (positive attribution): warm orange-amber
 # Against answer (negative attribution): cool teal-blue

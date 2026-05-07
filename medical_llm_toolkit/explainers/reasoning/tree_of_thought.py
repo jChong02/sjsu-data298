@@ -37,11 +37,11 @@ class TreeOfThoughtExtractor:
     Tree-of-Thought reasoning extractor.
 
     Algorithm (per extract() call):
-      1. Branch  — sample n_branches independent reasoning thoughts
-      2. Score   — rank each by mean log-probability (model coherence proxy)
-      3. Select  — keep the highest-scoring thought
-      4. Solve   — run constrained answer generation conditioned on best thought
-      5. Explain — generate final rationale
+      1. Branch  - sample n_branches independent reasoning thoughts
+      2. Score   - rank each by mean log-probability (model coherence proxy)
+      3. Select  - keep the highest-scoring thought
+      4. Solve   - run constrained answer generation conditioned on best thought
+      5. Explain - generate final rationale
 
     Attributes (after extract()):
         last_result (dict): Most recent extraction result.
@@ -88,16 +88,16 @@ class TreeOfThoughtExtractor:
         Run a full Tree-of-Thought pass for a single prompt.
 
         Returns a dict with keys:
-            thoughts        — list of all generated thought branches
-            scores          — list of mean log-prob scores (parallel to thoughts)
-            best_idx        — index of the selected branch
-            best_thought    — the selected branch's text
-            answer          — final answer string
-            confidence      — softmax probability of selected answer (mcq/yn only)
-            option_probs    — per-option probabilities (mcq/yn only)
-            rationale       — generated rationale (mcq/yn only)
-            tot_prompt      — the thought-generation prompt
-            task_type       — task type used
+            thoughts        - list of all generated thought branches
+            scores          - list of mean log-prob scores (parallel to thoughts)
+            best_idx        - index of the selected branch
+            best_thought    - the selected branch's text
+            answer          - final answer string
+            confidence      - softmax probability of selected answer (mcq/yn only)
+            option_probs    - per-option probabilities (mcq/yn only)
+            rationale       - generated rationale (mcq/yn only)
+            tot_prompt      - the thought-generation prompt
+            task_type       - task type used
         """
         effective_task = task_type or self.wrapper.task_type
 

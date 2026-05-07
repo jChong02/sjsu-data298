@@ -1,5 +1,5 @@
 """
-LLM XAI Toolkit — Streamlit App
+LLM XAI Toolkit - Streamlit App
 
 Run with:
     streamlit run app/main.py
@@ -30,7 +30,7 @@ st.set_page_config(
 )
 
 # ---------------------------------------------------------------------------
-# Custom CSS — subtle warmth, better spacing, consistent feel
+# Custom CSS - subtle warmth, better spacing, consistent feel
 # ---------------------------------------------------------------------------
 st.markdown("""
 <style>
@@ -45,12 +45,12 @@ st.markdown("""
         border-right: 1px solid rgba(255,255,255,0.05);
     }
 
-    /* Headers — warm off-white with subtle accent */
+    /* Headers - warm off-white with subtle accent */
     h1 { color: #e8e0d4 !important; }
     h2 { color: #d4cec4 !important; border-bottom: 2px solid #e8992322; padding-bottom: 8px; }
     h3 { color: #c8c2b8 !important; }
 
-    /* Metric cards — subtle border and tint */
+    /* Metric cards - subtle border and tint */
     [data-testid="stMetric"] {
         background: rgba(232, 153, 35, 0.04);
         border: 1px solid rgba(232, 153, 35, 0.12);
@@ -85,7 +85,7 @@ st.markdown("""
         border-radius: 6px;
     }
 
-    /* Buttons — accent color */
+    /* Buttons - accent color */
     .stButton > button[kind="primary"] {
         background-color: #e89923;
         border: none;
@@ -95,7 +95,7 @@ st.markdown("""
         background-color: #d4880f;
     }
 
-    /* Text area and inputs — subtle border */
+    /* Text area and inputs - subtle border */
     .stTextArea textarea, .stTextInput input {
         border: 1px solid rgba(255,255,255,0.1) !important;
         background: rgba(255,255,255,0.03) !important;
@@ -171,7 +171,7 @@ if "app_mode" not in st.session_state:
     st.session_state.app_mode = "Attribution Methods"
 
 # ---------------------------------------------------------------------------
-# Sidebar — Model Configuration
+# Sidebar - Model Configuration
 # ---------------------------------------------------------------------------
 with st.sidebar:
     st.header("App Mode")
@@ -347,7 +347,7 @@ example_choice = st.selectbox("Load Example Question", options=list(examples.key
 is_example = example_choice != "Custom"
 
 if is_example:
-    # Example selected — show as read-only display
+    # Example selected - show as read-only display
     prompt = examples[example_choice]
     st.text_area(
         "Question Prompt",
@@ -356,7 +356,7 @@ if is_example:
         disabled=True,
     )
 else:
-    # Custom — editable text area
+    # Custom - editable text area
     prompt = st.text_area(
         "Enter Question Prompt",
         height=150,
@@ -448,7 +448,7 @@ if _show_attribution_section and gen_result is not None:
             st.plotly_chart(fig, use_container_width=True)
 
     # ---- Explanations ----
-    # Show the explanations section for any task type — the registry filter
+    # Show the explanations section for any task type - the registry filter
     # below decides which methods actually appear. Methods that don't support
     # the current task (LIME / IG / ELI5 for free; etc.) are hidden via their
     # ExplainerUI.supported_tasks declaration.

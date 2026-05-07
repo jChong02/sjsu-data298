@@ -98,7 +98,7 @@ class TreeOfThoughtUI(ReasoningUI):
             cols[1].metric("Branches", n_branches)
         else:
             cols = st.columns(4)
-            cols[0].metric("Answer", result.get("answer") or "—")
+            cols[0].metric("Answer", result.get("answer") or "-")
             if result.get("confidence") is not None:
                 cols[1].metric("Confidence", f"{result['confidence']:.4f}")
             if ground_truth:

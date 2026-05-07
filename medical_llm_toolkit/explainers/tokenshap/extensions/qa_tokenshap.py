@@ -106,7 +106,7 @@ class QATokenSHAP(TokenSHAP):
         }
 
         self._debug_print(
-            "[QATokenSHAP] Captured BASELINE — "
+            "[QATokenSHAP] Captured BASELINE - "
             f"pred={self._baseline_meta['pred']}  probs={self._baseline_meta['probs']}"
         )
 
@@ -144,7 +144,7 @@ class QATokenSHAP(TokenSHAP):
             }
             captured_snapshots.append(snapshot)
             self._debug_print(
-                f"[QATokenSHAP] Captured after generate — "
+                f"[QATokenSHAP] Captured after generate - "
                 f"pred={snapshot['pred']}  probs={snapshot['probs']}"
             )
             return response

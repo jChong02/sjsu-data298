@@ -1,5 +1,5 @@
 """
-Explainer registry — plugin system for XAI methods.
+Explainer registry - plugin system for XAI methods.
 
 To add a new method:
 1. Create a new file in app/explainers/
@@ -19,10 +19,10 @@ class ExplainerUI(ABC):
     Base class for explainer UI components.
 
     Each explainer must define:
-        name         — unique identifier (e.g., "lime")
-        display_name — shown in UI tabs (e.g., "LIME")
-        description  — one-line summary for tooltips
-        supported_tasks — set of task types this method supports (e.g., {"yn", "mcq"})
+        name         - unique identifier (e.g., "lime")
+        display_name - shown in UI tabs (e.g., "LIME")
+        description  - one-line summary for tooltips
+        supported_tasks - set of task types this method supports (e.g., {"yn", "mcq"})
     """
 
     name: str = ""
@@ -51,8 +51,8 @@ class ExplainerUI(ABC):
         """
         Run the explainer. Return a result dict.
         The result dict should contain at minimum:
-            'tokens' or 'words' — list of text segments
-            'attributions' — scores per segment (list or numpy array)
+            'tokens' or 'words' - list of text segments
+            'attributions' - scores per segment (list or numpy array)
         Additional keys are method-specific.
         """
         pass

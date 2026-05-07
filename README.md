@@ -2,15 +2,28 @@
 
 A unified explainability and reasoning toolkit for medical question-answering language models. Combines four attribution methods (LIME, Integrated Gradients, TokenSHAP, ELI5) and two reasoning methods (Chain-of-Thought, Tree-of-Thought) into a single interactive Streamlit interface, enabling users to generate, compare, and analyze explanations across methods.
 
+## Scope
+
+The XAI and reasoning methods implemented here are **topic-agnostic**. LIME, Integrated Gradients, TokenSHAP, ELI5, Chain-of-Thought, and Tree-of-Thought all work on any HuggingFace causal LM and any QA prompt - none of them encode biomedical assumptions.
+
+As an SJSU DATA 298 capstone project, we chose to ground the work in **biomedical question-answering** - a high-stakes domain where interpretability matters. The following pieces of the repository are biomedical *by choice*, not by necessity:
+
+- The bundled dataset (`data/compiled_df.parquet`, drawn from medical QA sources)
+- The four preset models in the sidebar (Apollo-2B, BioMistral-7B, MedGemma-4B, BioMedLM)
+- The pre-trained ELI5 surrogates shipped in `medical_llm_toolkit/eli5_surrogates/`
+- The example prompts in the UI
+
+To apply the same methods to a different domain, swap in any HuggingFace causal LM, feed the wrapper any QA prompt, and (for ELI5) train new surrogates on your own corpus with [`notebooks/train_eli5_surrogates.ipynb`](notebooks/train_eli5_surrogates.ipynb).
+
 ## Features
 
-- **Model-agnostic wrapper** — standardized interface for any HuggingFace causal LLM with constrained generation, confidence extraction, and three task modes (Y/N, MCQ, free response).
-- **Four attribution methods** — LIME, Integrated Gradients, TokenSHAP (with QA-aware perturbation, correctness/embedding/hybrid value functions, and semantic NER-based splitters), and ELI5 (TF-IDF + Logistic Regression surrogate with native per-class feature attributions).
-- **Two reasoning methods** — Chain-of-Thought (CoT) and Tree-of-Thought (ToT) prompting strategies.
-- **Pre-trained ELI5 surrogates** — bundles ship for the four preset LLMs so ELI5 explanations are instant; a notebook trains new ones for custom models.
-- **Interactive Streamlit UI** — per-method configuration, cross-method token-overlap comparison, and a separate Reasoning Methods mode.
-- **Unified evaluation framework** — single CLI script for faithfulness (deletion AUC) and stability (overlap@k) evaluation across models and methods.
-- **Extensible plugin architecture** — add a new XAI method as a single `ExplainerUI` subclass; it auto-registers as a new tab.
+- **Model-agnostic wrapper** - standardized interface for any HuggingFace causal LLM with constrained generation, confidence extraction, and three task modes (Y/N, MCQ, free response).
+- **Four attribution methods** - LIME, Integrated Gradients, TokenSHAP (with QA-aware perturbation, correctness/embedding/hybrid value functions, and semantic NER-based splitters), and ELI5 (TF-IDF + Logistic Regression surrogate with native per-class feature attributions).
+- **Two reasoning methods** - Chain-of-Thought (CoT) and Tree-of-Thought (ToT) prompting strategies.
+- **Pre-trained ELI5 surrogates** - bundles ship for the four preset LLMs so ELI5 explanations are instant; a notebook trains new ones for custom models.
+- **Interactive Streamlit UI** - per-method configuration, cross-method token-overlap comparison, and a separate Reasoning Methods mode.
+- **Unified evaluation framework** - single CLI script for faithfulness (deletion AUC) and stability (overlap@k) evaluation across models and methods.
+- **Extensible plugin architecture** - add a new XAI method as a single `ExplainerUI` subclass; it auto-registers as a new tab.
 
 ## Project Structure
 
@@ -19,6 +32,7 @@ sjsu-data298/
 ├── medical_llm_toolkit/                # Core library
 │   ├── __init__.py
 │   ├── wrapper.py                      # MedicalLLMWrapper
+│   ├── cli.py                          # `medxai` console-script launcher
 │   ├── eli5_surrogates/                # Pre-trained ELI5 .pkl bundles (per preset model + task)
 │   └── explainers/
 │       ├── lime.py                     # MedicalLIME
@@ -27,8 +41,8 @@ sjsu-data298/
 │       ├── tokenshap/
 │       │   ├── token_shap/             # Upstream TokenSHAP (untouched)
 │       │   └── extensions/             # QA-aware perturbation + value functions + semantic splitter
-│       │       ├── qa_tokenshap.py     # QATokenSHAP — keeps Answer Choices: static
-│       │       ├── extractors.py       # qa_extractor — splits prompt into question + suffix
+│       │       ├── qa_tokenshap.py     # QATokenSHAP - keeps Answer Choices: static
+│       │       ├── extractors.py       # qa_extractor - splits prompt into question + suffix
 │       │       ├── value_functions/
 │       │       │   ├── correctness_value.py     # binary or prob correctness payoff
 │       │       │   ├── embedding_value.py        # cosine similarity over HF encoder embeddings
@@ -63,9 +77,9 @@ sjsu-data298/
 │   └── train_eli5_surrogates.ipynb     # Train ELI5 .pkl bundles for any model
 ├── data/                               # Dataset parquet files
 ├── examples/basic_usage.py
-├── setup.py
-├── requirements.txt
-└── run.bat                             # Windows launcher
+├── pyproject.toml                      # Build config + dependencies (single source of truth)
+├── LICENSE                             # MIT
+└── run.bat                             # Windows convenience launcher (calls `medxai`)
 ```
 
 ## Quick start
@@ -78,15 +92,37 @@ cd sjsu-data298
 pip install -e .
 ```
 
-`setup.py` declares all runtime dependencies (torch, transformers, scikit-learn, eli5, streamlit, plotly, etc.) so a single `pip install -e .` is enough.
+`pyproject.toml` declares all runtime dependencies (torch, transformers, scikit-learn, eli5, streamlit, plotly, etc.) as a single source of truth, so `pip install -e .` is enough to install everything.
+
+#### Optional extras
+
+```bash
+pip install -e ".[spacy]"                  # spaCy NER splitter for TokenSHAP
+pip install -e ".[sentence-transformers]"  # SBERT backend for upstream paths
+pip install -e ".[all]"                    # all optional extras
+```
+
+If you install the spaCy extra, you also need to download a model:
+
+```bash
+python -m spacy download en_core_web_sm
+```
 
 ### Launch the UI
 
+After install, the toolkit registers a cross-platform `medxai` console command:
+
 ```bash
-# Windows
+medxai
+```
+
+Equivalent fallbacks:
+
+```bash
+# Windows convenience launcher
 run.bat
 
-# Or directly (any platform)
+# Or directly invoke streamlit
 streamlit run app/main.py
 ```
 
@@ -134,7 +170,7 @@ result = ig.attribute(prompt, target_class="A", return_convergence_delta=True)
 print(result["convergence_delta"])
 ```
 
-### TokenSHAP — three configurable extensions
+### TokenSHAP - three configurable extensions
 
 `QATokenSHAP` keeps the answer-choices block static during perturbation. Three pluggable components let you adapt the analysis to QA tasks:
 
@@ -148,13 +184,13 @@ from medical_llm_toolkit.explainers.tokenshap.extensions.splitters import (
     SemanticSplitter, SpaCyNERBackend,
 )
 
-# (1) Correctness value function — measures contribution to the correct answer.
+# (1) Correctness value function - measures contribution to the correct answer.
 vec = CorrectnessValueFunction(correct_label="A", mode="prob")
 
-# (2) Embedding similarity — semantic response similarity (use any HF encoder).
+# (2) Embedding similarity - semantic response similarity (use any HF encoder).
 # vec = EmbeddingVectorizer("sentence-transformers/all-MiniLM-L6-v2", device="cuda")
 
-# (3) Hybrid — alpha-blend of correctness and embedding similarity.
+# (3) Hybrid - alpha-blend of correctness and embedding similarity.
 # vec = HybridValueFunction(
 #     correct_label="A",
 #     embedding_vectorizer=EmbeddingVectorizer(),
@@ -183,7 +219,7 @@ explainer = MedicalELI5.from_disk("FreedomIntelligence/Apollo-2B", "mcq")
 result = explainer.explain(prompt, kind="mimic", top=20)
 print(result["predicted_class"], result["heldout_score"], result["delta_above_prior"])
 
-# Train new bundles for custom models — see notebooks/train_eli5_surrogates.ipynb
+# Train new bundles for custom models - see notebooks/train_eli5_surrogates.ipynb
 ```
 
 ### Chain-of-Thought / Tree-of-Thought
@@ -223,10 +259,10 @@ Tested with the four presets that ship with pre-trained ELI5 surrogates:
 |---|---|---|
 | Apollo 2B | `FreedomIntelligence/Apollo-2B` | Smallest, fastest |
 | BioMistral 7B | `BioMistral/BioMistral-7B` | |
-| MedGemma 4B | `google/medgemma-4b-it` | Gated — set `HF_TOKEN` env var |
+| MedGemma 4B | `google/medgemma-4b-it` | Gated - set `HF_TOKEN` env var |
 | BioMedLM | `stanford-crfm/BioMedLM` | |
 
-Any HuggingFace causal LM works for the wrapper, LIME, IG, TokenSHAP, and CoT/ToT. ELI5 needs a pre-trained surrogate bundle — for non-preset models, run [`notebooks/train_eli5_surrogates.ipynb`](notebooks/train_eli5_surrogates.ipynb).
+Any HuggingFace causal LM works for the wrapper, LIME, IG, TokenSHAP, and CoT/ToT. ELI5 needs a pre-trained surrogate bundle - for non-preset models, run [`notebooks/train_eli5_surrogates.ipynb`](notebooks/train_eli5_surrogates.ipynb).
 
 ## Adding a new XAI method
 
@@ -257,10 +293,20 @@ register(YourMethodUI())
 
 The new method automatically appears as a tab in the UI. The Comparison tab picks it up if its result dict has `tokens` (or `words`) and `attributions` (or `word_attributions`); ELI5 is excluded from the comparison because its output shape is different.
 
+## Team
+
+**SJSU DATA 298A / 298B - Team 8** (Fall 2025 / Spring 2026)
+
+- Anne Ha
+- Jeff Chong
+- Jiyoon Lee
+- Matthew Leffler
+- Nairui Liu
+
 ## Acknowledgments
 
-- TokenSHAP — Karczmarz et al. ([upstream repo](https://github.com/GenAISHAP/TokenSHAP))
-- LIME — Ribeiro et al. (2016)
-- Integrated Gradients — Sundararajan et al. (2017)
-- ELI5 — [eli5 library](https://github.com/TeamHG-Memex/eli5)
+- TokenSHAP - Karczmarz et al. ([upstream repo](https://github.com/GenAISHAP/TokenSHAP))
+- LIME - Ribeiro et al. (2016)
+- Integrated Gradients - Sundararajan et al. (2017)
+- ELI5 - [eli5 library](https://github.com/TeamHG-Memex/eli5)
 - Built on HuggingFace Transformers

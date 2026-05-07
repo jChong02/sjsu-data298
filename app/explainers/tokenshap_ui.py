@@ -13,7 +13,7 @@ def _strip_position_suffix(token_key: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Cached loaders — expensive objects are shared across reruns and sessions
+# Cached loaders - expensive objects are shared across reruns and sessions
 # ---------------------------------------------------------------------------
 
 @st.cache_resource
@@ -56,8 +56,8 @@ _VECTORIZER_OPTIONS_FREE = [
 
 _SPLITTER_OPTIONS = [
     "Word (default)",
-    "Semantic — spaCy NER",
-    "Semantic — HuggingFace NER",
+    "Semantic - spaCy NER",
+    "Semantic - HuggingFace NER",
 ]
 
 
@@ -84,7 +84,7 @@ class TokenShapUI(ExplainerUI):
         # Free task gets a narrower vectorizer list (correctness-based options
         # need a ground-truth letter label) and a lower default Max Combinations
         # because free generation produces ~200 tokens per LLM call vs 1 token
-        # under constrained yn/mcq decoding — each combination is much slower.
+        # under constrained yn/mcq decoding - each combination is much slower.
         vec_options = _VECTORIZER_OPTIONS_FREE if is_free else _VECTORIZER_OPTIONS_LABELED
         default_max_comb = 30 if is_free else 100
 
@@ -94,7 +94,7 @@ class TokenShapUI(ExplainerUI):
                 "perturbation. Correctness/Hybrid value functions are hidden "
                 "because they require an A/B/C/D ground-truth label. Each LLM "
                 "call generates a full free-text response, so keep "
-                "**Max Combinations** low (≈30) — expect several minutes."
+                "**Max Combinations** low (≈30) - expect several minutes."
             )
 
         # --- Row 1: main controls ---
@@ -207,7 +207,7 @@ class TokenShapUI(ExplainerUI):
                         )
 
         # Warn if a correctness-based vectorizer is chosen but no ground truth
-        # will be available — the app passes ground_truth at run time, so we
+        # will be available - the app passes ground_truth at run time, so we
         # surface the warning here rather than silently falling back.
         if ("Correctness" in vectorizer or "Hybrid" in vectorizer):
             st.info(
@@ -357,7 +357,7 @@ class TokenShapUI(ExplainerUI):
         is_free = result.get("task_type") == "free"
 
         # Header metrics. yn/mcq predictions are a single letter so we show
-        # them as a normal metric. Free predictions are full text — render
+        # them as a normal metric. Free predictions are full text - render
         # them as a code block above the metrics so the layout doesn't break.
         if is_free:
             st.markdown("**Generated response (baseline for Shapley comparison):**")

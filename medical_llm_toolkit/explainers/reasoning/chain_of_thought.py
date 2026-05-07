@@ -267,7 +267,7 @@ class ChainOfThoughtExtractor:
     ) -> Tuple[str, Optional[float], Optional[Dict]]:
         if task_type == "free":
             # Free response: the reasoning IS the answer. Don't try to pull
-            # an A/B/C/D out of it — the bare-letter fallback pattern would
+            # an A/B/C/D out of it - the bare-letter fallback pattern would
             # spuriously match references like "Patient A" or "Type B".
             return reasoning, None, None
 
@@ -311,7 +311,7 @@ class ChainOfThoughtExtractor:
         if text_answer and text_answer != model_answer and self.verbose:
             print(
                 f"[CoT] Note: text extracted '{text_answer}' but model scores "
-                f"'{model_answer}' as highest probability — using model score."
+                f"'{model_answer}' as highest probability - using model score."
             )
 
         return model_answer, confidence, option_probs
