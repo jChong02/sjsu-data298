@@ -264,6 +264,35 @@ class MedicalELI5:
                     "features": features,
                 }
 
+            # Binary symmetry: sklearn's binary LogisticRegression stores
+            # coefficients only for the positive class, so eli5 returns one
+            # TargetExplanation. Synthesize the missing negative-class view
+            # by negating bias/feature weights and complementing the
+            # probability. This guarantees per_class_features covers every
+            # label so the UI can render both tabs.
+            if len(labels) == 2 and len(per_class_features) == 1:
+                explained_label = next(iter(per_class_features))
+                other_label = labels[0] if labels[1] == explained_label else labels[1]
+                explained = per_class_features[explained_label]
+                per_class_features[other_label] = {
+                    "score": (
+                        -explained["score"]
+                        if explained.get("score") is not None else None
+                    ),
+                    "proba": (
+                        1.0 - explained["proba"]
+                        if explained.get("proba") is not None else None
+                    ),
+                    "bias": (
+                        -explained["bias"]
+                        if explained.get("bias") is not None else None
+                    ),
+                    "features": [
+                        (name, -weight, value)
+                        for (name, weight, value) in explained["features"]
+                    ],
+                }
+
             # Keep the native HTML around for users who want the raw view.
             expl_html = eli5.show_prediction(
                 clf, prompt, vec=vec, top=top, target_names=target_names

@@ -44,12 +44,12 @@ sjsu-data298/
 │       │       ├── qa_tokenshap.py     # QATokenSHAP - keeps Answer Choices: static
 │       │       ├── extractors.py       # qa_extractor - splits prompt into question + suffix
 │       │       ├── value_functions/
-│       │       │   ├── correctness_value.py     # binary or prob correctness payoff
-│       │       │   ├── embedding_value.py        # cosine similarity over HF encoder embeddings
-│       │       │   └── hybrid_value.py           # alpha-weighted blend of the above
+│       │       │   ├── correctness_value.py    # binary or prob correctness payoff
+│       │       │   ├── embedding_value.py      # cosine similarity over HF encoder embeddings
+│       │       │   └── hybrid_value.py         # alpha-weighted blend of the above
 │       │       └── splitters/
-│       │           ├── semantic_splitter.py     # NER-based atomic-entity splitter
-│       │           └── ner_backends.py          # spaCy / HuggingFace NER backends
+│       │           ├── semantic_splitter.py    # NER-based atomic-entity splitter
+│       │           └── ner_backends.py         # spaCy / HuggingFace NER backends
 │       └── reasoning/
 │           ├── chain_of_thought.py     # ChainOfThoughtExtractor
 │           └── tree_of_thought.py      # TreeOfThoughtExtractor
@@ -66,8 +66,15 @@ sjsu-data298/
 │   └── reasoning/
 │       ├── cot_ui.py
 │       └── tot_ui.py
+├── data/                               # Bundled dataset parquet files
+├── data-prep/                          # Notebooks documenting dataset construction
+│   ├── preliminary_dataset_exploration.ipynb
+│   └── preprocessing.ipynb
 ├── eval/
-│   └── run_evaluation.py               # Unified faithfulness + stability evaluation
+│   ├── run_evaluation.py               # Unified faithfulness + stability evaluation
+│   └── results/                        # CSV outputs from prior eval runs
+├── examples/
+│   └── basic_usage.py
 ├── notebooks/
 │   ├── demo_wrapper.ipynb              # Wrapper API walk-through
 │   ├── demo_lime.ipynb
@@ -75,11 +82,9 @@ sjsu-data298/
 │   ├── demo_ELI5.ipynb
 │   ├── medical_llm_wrapper_demo.ipynb  # Standalone end-to-end demo
 │   └── train_eli5_surrogates.ipynb     # Train ELI5 .pkl bundles for any model
-├── data/                               # Dataset parquet files
-├── examples/basic_usage.py
 ├── pyproject.toml                      # Build config + dependencies (single source of truth)
 ├── LICENSE                             # MIT
-└── run.bat                             # Windows convenience launcher (calls `medxai`)
+└── run.bat                             # Windows convenience launcher
 ```
 
 ## Quick start
