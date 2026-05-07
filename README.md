@@ -259,7 +259,7 @@ The new method automatically appears as a tab in the UI. The Comparison tab pick
 
 ## Acknowledgments
 
-- TokenSHAP — Karczmarz et al. ([upstream repo](https://github.com/KarczmarzJakub/TokenSHAP))
+- TokenSHAP — Karczmarz et al. ([upstream repo](https://github.com/GenAISHAP/TokenSHAP))
 - LIME — Ribeiro et al. (2016)
 - Integrated Gradients — Sundararajan et al. (2017)
 - ELI5 — [eli5 library](https://github.com/TeamHG-Memex/eli5)
