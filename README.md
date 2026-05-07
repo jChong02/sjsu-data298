@@ -4,9 +4,9 @@ A unified explainability and reasoning toolkit for medical question-answering la
 
 ## Scope
 
-The XAI and reasoning methods implemented here are **topic-agnostic**. LIME, Integrated Gradients, TokenSHAP, ELI5, Chain-of-Thought, and Tree-of-Thought all work on any HuggingFace causal LM and any QA prompt - none of them encode biomedical assumptions.
+The XAI and reasoning methods implemented here are **topic-agnostic**. LIME, Integrated Gradients, TokenSHAP, ELI5, Chain-of-Thought, and Tree-of-Thought all work on any HuggingFace causal LM and any QA prompt (none of them encode biomedical assumptions).
 
-As an SJSU DATA 298 capstone project, we chose to ground the work in **biomedical question-answering** - a high-stakes domain where interpretability matters. The following pieces of the repository are biomedical *by choice*, not by necessity:
+As an SJSU DATA 298 project, we chose to ground the work in **biomedical question-answering**, a high-stakes domain where interpretability matters. The following pieces of the repository are biomedical *by choice*, not by necessity:
 
 - The bundled dataset (`data/compiled_df.parquet`, drawn from medical QA sources)
 - The four preset models in the sidebar (Apollo-2B, BioMistral-7B, MedGemma-4B, BioMedLM)
