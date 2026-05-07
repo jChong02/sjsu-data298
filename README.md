@@ -1,6 +1,6 @@
 # Medical LLM XAI Toolkit
 
-A unified explainability and reasoning toolkit for medical question-answering language models. Combines four attribution methods (LIME, Integrated Gradients, TokenSHAP, ELI5) and two reasoning methods (Chain-of-Thought, Tree-of-Thought) into a single interactive Streamlit interface, enabling users to generate, compare, and analyze explanations across methods.
+A unified explainability and reasoning toolkit for question-answering language models. Combines four attribution methods (LIME, Integrated Gradients, TokenSHAP, ELI5) and two reasoning methods (Chain-of-Thought, Tree-of-Thought) into a single interactive Streamlit interface, enabling users to generate, compare, and analyze explanations across methods.
 
 ## Scope
 
