@@ -189,7 +189,15 @@ with st.sidebar:
 
     st.divider()
 
-    st.header("Model Configuration")
+    # =====================================================================
+    # Model Loading section
+    # Controls here only take effect when the user clicks "Load Model".
+    # =====================================================================
+    st.header("Model Loading")
+    st.caption(
+        "Pick a model and device, then click **Load Model**. Changes here "
+        "are not applied until the model is loaded (or reloaded)."
+    )
 
     # HF token
     with st.expander("Hugging Face Token (for gated models)"):
@@ -216,25 +224,6 @@ with st.sidebar:
     else:
         model_id = PRESET_MODELS[model_choice]
 
-    # Task type
-    task_type = st.selectbox(
-        "Task Type",
-        options=["yn", "mcq", "free"],
-        format_func=lambda x: {"yn": "Yes / No", "mcq": "Multiple Choice", "free": "Free Response"}[x],
-        help="Determines answer constraints and which XAI methods are available.",
-    )
-
-    # Switching task type invalidates the previous generation result and
-    # explainer outputs (different answer space, different available methods).
-    # Clear them so the main panel doesn't keep showing stale state from the
-    # previous task.
-    _prev_task = st.session_state.get("_prev_task_type")
-    if _prev_task is not None and _prev_task != task_type:
-        st.session_state.generation_result = None
-        st.session_state.explainer_results = {}
-        st.session_state.reasoning_results = {}
-    st.session_state._prev_task_type = task_type
-
     # Device selection
     import torch as _torch
     _gpu_available = _torch.cuda.is_available()
@@ -245,20 +234,6 @@ with st.sidebar:
         help="GPU (cuda) is faster but requires VRAM. CPU works for smaller models.",
     )
 
-    # Generation mode
-    gen_mode = st.selectbox(
-        "Generation Mode",
-        options=["answer_rationale", "answer_only"],
-        format_func=lambda x: {
-            "answer_rationale": "Answer + Rationale",
-            "answer_only": "Answer Only",
-        }[x],
-        help="'Answer + Rationale' generates a reasoning explanation. "
-             "'Answer Only' returns just the predicted answer with confidence.",
-    )
-
-    st.divider()
-
     # Load / Clear buttons
     col_load, col_clear = st.columns(2)
     with col_load:
@@ -266,7 +241,9 @@ with st.sidebar:
     with col_clear:
         clear_clicked = st.button("Clear Model", use_container_width=True)
 
-    # Handle load
+    # Handle load. Note: task_type and gen_mode are read in the next section,
+    # so we don't apply them here -- the post-render sync below picks them
+    # up before the user can issue any generation.
     if load_clicked and model_id:
         st.session_state.model_status = "loading"
         st.session_state.generation_result = None
@@ -283,9 +260,6 @@ with st.sidebar:
                     device=device_choice,
                     token=hf_token,
                 )
-                wrapper.set_task(task_type)
-                wrapper.set_mode(gen_mode)
-
                 st.session_state.wrapper = wrapper
                 st.session_state.model_status = "ready"
             except Exception as e:
@@ -327,7 +301,51 @@ with st.sidebar:
     else:
         st.warning("No model loaded")
 
-    # Sync task type and gen mode if model is loaded
+    st.divider()
+
+    # =====================================================================
+    # Generation Settings section
+    # Controls here apply immediately to the loaded wrapper - no reload.
+    # =====================================================================
+    st.header("Generation Settings")
+    st.caption(
+        "These apply immediately to the loaded model. No need to click "
+        "**Load Model** after changing them."
+    )
+
+    # Task type
+    task_type = st.selectbox(
+        "Task Type",
+        options=["yn", "mcq", "free"],
+        format_func=lambda x: {"yn": "Yes / No", "mcq": "Multiple Choice", "free": "Free Response"}[x],
+        help="Determines answer constraints and which XAI methods are available.",
+    )
+
+    # Switching task type invalidates the previous generation result and
+    # explainer outputs (different answer space, different available methods).
+    # Clear them so the main panel doesn't keep showing stale state from the
+    # previous task.
+    _prev_task = st.session_state.get("_prev_task_type")
+    if _prev_task is not None and _prev_task != task_type:
+        st.session_state.generation_result = None
+        st.session_state.explainer_results = {}
+        st.session_state.reasoning_results = {}
+    st.session_state._prev_task_type = task_type
+
+    # Generation mode
+    gen_mode = st.selectbox(
+        "Generation Mode",
+        options=["answer_rationale", "answer_only"],
+        format_func=lambda x: {
+            "answer_rationale": "Answer + Rationale",
+            "answer_only": "Answer Only",
+        }[x],
+        help="'Answer + Rationale' generates a reasoning explanation. "
+             "'Answer Only' returns just the predicted answer with confidence.",
+    )
+
+    # Sync task type and gen mode to the wrapper on every render so the
+    # selections in this section take effect without requiring a reload.
     if st.session_state.wrapper is not None:
         st.session_state.wrapper.set_task(task_type)
         st.session_state.wrapper.set_mode(gen_mode)
