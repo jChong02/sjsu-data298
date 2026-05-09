@@ -9,10 +9,10 @@ from app.visualization import apply_plotly_theme
 
 class TreeOfThoughtUI(ReasoningUI):
     name = "tot"
-    display_name = "Tree-of-Thought"
+    display_name = "Best-of-N Sampling"
     description = (
         "Generates multiple candidate reasoning branches, scores each by mean "
-        "log-probability under the model, and selects the most coherent one "
+        "log-probability under the model, and selects the most fluent one "
         "before answering."
     )
     supported_tasks = {"yn", "mcq", "free"}
