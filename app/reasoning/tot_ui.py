@@ -137,6 +137,21 @@ class TreeOfThoughtUI(ReasoningUI):
             apply_plotly_theme(fig)
             st.plotly_chart(fig, use_container_width=True)
 
+            st.markdown(
+                '<div style="color:#e87b7b; font-size:13px; '
+                'border-left:3px solid #e87b7b; padding:6px 12px; '
+                'background:rgba(232,123,123,0.06); border-radius:4px; '
+                'margin-top:-8px; margin-bottom:12px;">'
+                '<strong>Note:</strong> The score reflects how <em>fluent</em> '
+                'the reasoning reads to the model itself (mean log-probability '
+                'per token). It is not a measure of correctness, factual '
+                'accuracy, or medical validity. The selected branch is the '
+                'most natural-sounding sample, not necessarily the most '
+                'correct one.'
+                '</div>',
+                unsafe_allow_html=True,
+            )
+
         # Branch text
         st.subheader("Reasoning Branches")
         for i, (thought, score) in enumerate(zip(thoughts, scores)):
