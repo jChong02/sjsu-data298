@@ -107,60 +107,18 @@ class TreeOfThoughtUI(ReasoningUI):
             cols[3].metric("Branches", n_branches)
 
         thoughts = result.get("thoughts") or []
-        scores = result.get("scores") or []
         best_idx = result.get("best_idx", 0)
 
-        # Score chart
-        if thoughts:
-            st.subheader("Branch Scores (mean log-probability)")
-            import plotly.graph_objects as go
-
-            colors = [
-                "#e89923" if i == best_idx else "#4a4a52"
-                for i in range(len(thoughts))
-            ]
-            fig = go.Figure(
-                go.Bar(
-                    x=[f"Branch {i+1}" for i in range(len(thoughts))],
-                    y=scores,
-                    marker_color=colors,
-                    text=[f"{s:.3f}" for s in scores],
-                    textposition="auto",
-                    textfont=dict(color="#e8e0d4"),
-                )
-            )
-            fig.update_layout(
-                height=240,
-                margin=dict(l=0, r=20, t=10, b=0),
-                yaxis_title="Mean log-prob (higher = more coherent)",
-            )
-            apply_plotly_theme(fig)
-            st.plotly_chart(fig, use_container_width=True)
-
-            st.markdown(
-                '<div style="color:#e87b7b; font-size:13px; '
-                'border-left:3px solid #e87b7b; padding:6px 12px; '
-                'background:rgba(232,123,123,0.06); border-radius:4px; '
-                'margin-top:-8px; margin-bottom:12px;">'
-                '<strong>Note:</strong> The score reflects how <em>fluent</em> '
-                'the reasoning reads to the model itself (mean log-probability '
-                'per token). It is not a measure of correctness, factual '
-                'accuracy, or medical validity. The selected branch is the '
-                'most natural-sounding sample, not necessarily the most '
-                'correct one.'
-                '</div>',
-                unsafe_allow_html=True,
-            )
-
         # Branch text
-        st.subheader("Reasoning Branches")
-        for i, (thought, score) in enumerate(zip(thoughts, scores)):
-            is_best = i == best_idx
-            label = f"Branch {i+1}  |  score: {score:.4f}"
-            if is_best:
-                label += "   ★ selected"
-            with st.expander(label, expanded=is_best):
-                st.markdown(thought or "*(empty)*")
+        if thoughts:
+            st.subheader("Reasoning Branches")
+            for i, thought in enumerate(thoughts):
+                is_best = i == best_idx
+                label = f"Branch {i+1}"
+                if is_best:
+                    label += "   ★ selected"
+                with st.expander(label, expanded=is_best):
+                    st.markdown(thought or "*(empty)*")
 
         # Final rationale
         rationale = result.get("rationale")
