@@ -281,7 +281,7 @@ class MedicalIntegratedGradients:
             avg_gradients = accumulated_gradients / valid_steps
             integrated_grads = (input_embeddings_cpu - baseline_embeddings_cpu) * avg_gradients
             token_attributions = integrated_grads.sum(dim=-1).squeeze(0)
-            token_attributions_np = token_attributions.numpy()
+            token_attributions_np = token_attributions.float().numpy()
 
         # Check for NaN in final result
         if np.isnan(token_attributions_np).any():
